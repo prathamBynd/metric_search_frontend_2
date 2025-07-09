@@ -512,6 +512,7 @@ const MetricTemplateSelector: FC<{
     custom_instruction: "",
   }])
   const [isDialogOpen, setIsDialogOpen] = useState(false)
+  const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
 
   const loadTemplates = async () => {
     try {
@@ -601,7 +602,26 @@ const MetricTemplateSelector: FC<{
           <SelectItem value="none">None</SelectItem>
           {templates.map((name) => (
             <SelectItem key={name} value={name}>
-              {name}
+              <span className="flex items-center justify-between w-full">
+                <span>{name}</span>
+                <Edit
+                  className="h-4 w-4 ml-2 text-gray-500 hover:text-gray-700"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    // Load template metrics for editing
+                    try {
+                      const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
+                      const data = await resp.json()
+                      const metrics = (data.metrics || []) as { metric: string; custom_instruction: string }[]
+                      setRows(metrics.length ? metrics : [{ metric: "", custom_instruction: "" }])
+                      setEditingTemplate(name)
+                      setIsDialogOpen(true)
+                    } catch (err) {
+                      console.error("Failed to load template for editing", err)
+                    }
+                  }}
+                />
+              </span>
             </SelectItem>
           ))}
           <SelectSeparator />
@@ -616,10 +636,14 @@ const MetricTemplateSelector: FC<{
       {/* Modal */}
       <DialogContent className="sm:max-w-[700px]">
         <DialogHeader>
-          <DialogTitle>Create Metric Template</DialogTitle>
+          <DialogTitle>{editingTemplate ? `Edit Template – ${editingTemplate}` : "Create Metric Template"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
-          <Input placeholder="Template Name" id="templateNameInput" />
+          <Input
+            placeholder="Template Name"
+            id="templateNameInput"
+            defaultValue={editingTemplate || ""}
+          />
 
           <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
             <Table>
@@ -677,6 +701,7 @@ const MetricTemplateSelector: FC<{
             onClick={() => {
               const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
               saveTemplate(nameInput?.value ?? "")
+              setEditingTemplate(null)
             }}
           >
             Save Template
