@@ -939,10 +939,12 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
     async function fetchResults() {
       try {
         if (!company) return
-        const encodedQuarter = encodeURIComponent(quarterTitle)
-        const encodedCompany = encodeURIComponent(company.name)
-        const path = `https://byndpdfstorage.blob.core.windows.net/metric-workflow/${encodedQuarter}/${encodedCompany}/${company.template}/results.json`
-        const resp = await fetch(path)
+        const qs = new URLSearchParams({
+          quarter: quarterTitle,
+          company: company.name,
+          template: company.template as string,
+        })
+        const resp = await fetch(`/api/results?${qs.toString()}`)
         if (!resp.ok) throw new Error("Failed to fetch results.json")
         const data = await resp.json()
         setResults(data)
