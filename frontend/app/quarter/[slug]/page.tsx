@@ -170,11 +170,17 @@ export default function QuarterDetailPage() {
   }, [companies.length, params.slug])
 
   const handleAddCompany = () => {
-    if (!newCompanyName.trim()) return
+    const trimmed = newCompanyName.trim()
+    if (!trimmed) return
+    // Prevent duplicates (case-insensitive)
+    if (companies.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
+      // Optionally show a message – for now we just ignore the duplicate request
+      return
+    }
     const newCompany: Company = {
       id: `comp-${Date.now()}`,
-      name: newCompanyName.trim(),
-      ticker: newCompanyName.trim().substring(0, 4).toUpperCase(),
+      name: trimmed,
+      ticker: trimmed.substring(0, 4).toUpperCase(),
       reportStatus: "Not Received",
       extractionStatus: "Idle",
       template: null,
