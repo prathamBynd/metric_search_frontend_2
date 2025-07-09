@@ -601,26 +601,25 @@ const MetricTemplateSelector: FC<{
         <SelectContent>
           <SelectItem value="none">None</SelectItem>
           {templates.map((name) => (
-            <SelectItem key={name} value={name}>
-              <span className="flex items-center justify-between w-full">
-                <span>{name}</span>
-                <Edit
-                  className="h-4 w-4 ml-2 text-gray-500 hover:text-gray-700"
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    // Load template metrics for editing
-                    try {
-                      const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
-                      const data = await resp.json()
-                      const metrics = (data.metrics || []) as { metric: string; custom_instruction: string }[]
-                      setRows(metrics.length ? metrics : [{ metric: "", custom_instruction: "" }])
-                      setEditingTemplate(name)
-                      setIsDialogOpen(true)
-                    } catch (err) {
-                      console.error("Failed to load template for editing", err)
-                    }
-                  }}
-                />
+            <SelectItem key={name} value={name} className="pr-10">{/* leave room for icon */}
+              {name}
+              <span
+                className="absolute right-2 cursor-pointer"
+                onClick={async (e) => {
+                  e.stopPropagation()
+                  try {
+                    const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
+                    const data = await resp.json()
+                    const metrics = (data.metrics || []) as { metric: string; custom_instruction: string }[]
+                    setRows(metrics.length ? metrics : [{ metric: "", custom_instruction: "" }])
+                    setEditingTemplate(name)
+                    setIsDialogOpen(true)
+                  } catch (err) {
+                    console.error("Failed to load template for editing", err)
+                  }
+                }}
+              >
+                <Edit className="h-4 w-4 text-gray-500 hover:text-gray-700" />
               </span>
             </SelectItem>
           ))}
