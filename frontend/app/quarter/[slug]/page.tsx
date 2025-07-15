@@ -209,26 +209,6 @@ export default function QuarterDetailPage() {
     const timePeriod = `${qPart}${fyPart}` // "Q4FY25"
 
     try {
-      // Load the template details to map metrics with selected docs
-      const tplResp = await fetch(`/api/metric-templates/${encodeURIComponent(targetCompany.template)}`)
-      if (!tplResp.ok) throw new Error("Failed to load template details")
-      const tplData = await tplResp.json()
-      const tplMetrics: { metric: string; custom_instruction?: string; docUrl?: string }[] = tplData.metrics || []
-
-      // Build the metrics payload expected by extraction API
-      const metricsPayload = tplMetrics.map((m, idx) => {
-        let pdfUrl = m.docUrl || ""
-        // If the template stored a specific docUrl use it; otherwise pick by index or the first doc
-        if (!pdfUrl) {
-          pdfUrl = targetCompany.reportUrls[idx] || targetCompany.reportUrls[0] || ""
-        }
-        return {
-          pdf_blob_url: pdfUrl,
-          metric: m.metric,
-          custom_instruction: m.custom_instruction || "",
-        }
-      })
-
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
       const resp = await fetch(`${apiBase}/api/extract-metrics`, {
         method: "POST",
@@ -236,7 +216,6 @@ export default function QuarterDetailPage() {
         body: JSON.stringify({
           template_name: targetCompany.template,
           time_period: timePeriod,
-          metrics: metricsPayload,
         }),
       })
 
@@ -663,7 +642,14 @@ const MetricTemplateSelector: FC<{
       const resp = await fetch("/api/metric-templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: trimmed, metrics: rows }),
+        body: JSON.stringify({
+          name: trimmed,
+          metrics: rows.map((r) => ({
+            metric: r.metric,
+            custom_instruction: r.custom_instruction,
+            pdf_blob_url: r.docUrl || "",
+          })),
+        }),
       })
 
       if (!resp.ok) {
@@ -740,11 +726,11 @@ const MetricTemplateSelector: FC<{
                   try {
                     const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
                     const data = await resp.json()
-                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; docUrl?: string }[]
+                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string }[]
                     const normalized = metricsRaw.map((m) => ({
                       metric: m.metric,
                       custom_instruction: m.custom_instruction,
-                      docUrl: m.docUrl || docs[0] || "",
+                      docUrl: m.docUrl || m.pdf_blob_url || docs[0] || "",
                     }))
                     setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "" }])
                     setEditingTemplate(name)
