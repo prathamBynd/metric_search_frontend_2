@@ -29,6 +29,24 @@ export async function GET(request: Request, { params }: { params: Promise<{ name
   }
 }
 
+export async function DELETE(request: Request, { params }: { params: Promise<{ name: string }> }) {
+  const { name } = await params
+  const blobName = `${folderPrefix}${name}.json`
+
+  try {
+    const service = BlobServiceClient.fromConnectionString(conn())
+    const container = service.getContainerClient(containerName)
+
+    const blobClient = container.getBlobClient(blobName)
+    await blobClient.deleteIfExists()
+
+    return NextResponse.json({ success: true })
+  } catch (err) {
+    console.error("Error deleting metric template", err)
+    return NextResponse.json({ error: "Failed to delete template" }, { status: 500 })
+  }
+}
+
 async function streamToString(readable: NodeJS.ReadableStream | null): Promise<string> {
   if (!readable) return ""
   const chunks: Uint8Array[] = []

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, type FC, useEffect } from "react"
-import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, ChevronUp, ChevronDown } from "lucide-react"
+import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, ChevronUp, ChevronDown, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -15,6 +15,7 @@ import Link from "next/link"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useParams } from "next/navigation"
+import { toast } from "@/hooks/use-toast"
 
 // --- TYPES ---
 type ReportStatus = "Received" | "Not Received"
@@ -28,7 +29,7 @@ interface Company {
   reportStatus: ReportStatus
   extractionStatus: ExtractionStatus
   template: string | null
-  reportUrl?: string
+  reportUrls: string[]
   verification?: "unverified" | "verified"
 }
 
@@ -104,7 +105,7 @@ export default function QuarterDetailPage() {
           reportStatus: c.reportFetched ? "Received" : "Not Received",
           extractionStatus: "Idle",
           template: null,
-          reportUrl: c.reportUrl || undefined,
+          reportUrls: c.reportUrls || [],
           verification: "unverified",
         }))
 
@@ -174,7 +175,11 @@ export default function QuarterDetailPage() {
     if (!trimmed) return
     // Prevent duplicates (case-insensitive)
     if (companies.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
-      // Optionally show a message – for now we just ignore the duplicate request
+      toast({
+        variant: "destructive",
+        title: "Duplicate Company",
+        description: `A company named "${trimmed}" already exists.`,
+      })
       return
     }
     const newCompany: Company = {
@@ -184,6 +189,7 @@ export default function QuarterDetailPage() {
       reportStatus: "Not Received",
       extractionStatus: "Idle",
       template: null,
+      reportUrls: [],
       verification: "unverified",
     }
     setCompanies((prev) => [...prev, newCompany])
@@ -202,23 +208,35 @@ export default function QuarterDetailPage() {
     const [fyPart, qPart] = quarterTitle.split(" ") // ["FY25", "Q4"]
     const timePeriod = `${qPart}${fyPart}` // "Q4FY25"
 
-    // Build PDF blob URL
-    const pdfBlobUrl = targetCompany.reportUrl || ""
-    if (!pdfBlobUrl) {
-      console.error("No report URL found for company")
-      setCompanies((prev) => prev.map((c) => (c.id === companyId ? { ...c, extractionStatus: "Idle" } : c)))
-      return
-    }
-
     try {
+      // Load the template details to map metrics with selected docs
+      const tplResp = await fetch(`/api/metric-templates/${encodeURIComponent(targetCompany.template)}`)
+      if (!tplResp.ok) throw new Error("Failed to load template details")
+      const tplData = await tplResp.json()
+      const tplMetrics: { metric: string; custom_instruction?: string; docUrl?: string }[] = tplData.metrics || []
+
+      // Build the metrics payload expected by extraction API
+      const metricsPayload = tplMetrics.map((m, idx) => {
+        let pdfUrl = m.docUrl || ""
+        // If the template stored a specific docUrl use it; otherwise pick by index or the first doc
+        if (!pdfUrl) {
+          pdfUrl = targetCompany.reportUrls[idx] || targetCompany.reportUrls[0] || ""
+        }
+        return {
+          pdf_blob_url: pdfUrl,
+          metric: m.metric,
+          custom_instruction: m.custom_instruction || "",
+        }
+      })
+
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
       const resp = await fetch(`${apiBase}/api/extract-metrics`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          pdf_blob_url: pdfBlobUrl,
           template_name: targetCompany.template,
           time_period: timePeriod,
+          metrics: metricsPayload,
         }),
       })
 
@@ -247,9 +265,9 @@ export default function QuarterDetailPage() {
     })
   }
 
-  const handleViewReport = (company: Company) => {
-    if (company.reportUrl) {
-      window.open(company.reportUrl, "_blank")
+  const handleViewReport = (url: string) => {
+    if (url) {
+      window.open(url, "_blank")
     }
   }
 
@@ -294,6 +312,23 @@ export default function QuarterDetailPage() {
         return m
       }),
     )
+  }
+
+  const handleDeleteCompany = async (company: Company) => {
+    if (!window.confirm(`Are you sure you want to delete ${company.name}? This will remove its data.`)) return
+    try {
+      const res = await fetch(`/api/quarters/${params.slug}/companies`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ company: company.name }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      setCompanies((prev) => prev.filter((c) => c.id !== company.id))
+      toast({ title: "Company Deleted", description: `${company.name} has been removed.` })
+    } catch (err) {
+      console.error(err)
+      toast({ variant: "destructive", title: "Delete Failed", description: "Could not delete the company." })
+    }
   }
 
   return (
@@ -346,8 +381,8 @@ export default function QuarterDetailPage() {
                     <TableCell className="font-medium">{company.name}</TableCell>
                     <TableCell>
                       <ReportStatusCell
-                        status={company.reportStatus}
-                        onViewReport={() => handleViewReport(company)}
+                        reports={company.reportUrls}
+                        onViewReport={(url) => handleViewReport(url)}
                         quarter={slugToTitle(params.slug)}
                         companyName={company.name}
                         onUploaded={(url) => {
@@ -355,7 +390,7 @@ export default function QuarterDetailPage() {
                           setCompanies((prev) =>
                             prev.map((c) =>
                               c.id === company.id
-                                ? { ...c, reportStatus: "Received", reportUrl: url }
+                                ? { ...c, reportStatus: "Received", reportUrls: [...c.reportUrls, url] }
                                 : c,
                             ),
                           )
@@ -366,6 +401,7 @@ export default function QuarterDetailPage() {
                       <MetricTemplateSelector
                         selectedTemplate={company.template}
                         onSelect={(templateId) => handleTemplateChange(company.id, templateId)}
+                        docs={company.reportUrls}
                       />
                     </TableCell>
                     <TableCell>
@@ -382,11 +418,16 @@ export default function QuarterDetailPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      <ActionButton
-                        company={company}
-                        onProcess={() => handleProcess(company.id)}
-                        onViewResults={() => handleViewResults(company)}
-                      />
+                      <div className="flex items-center gap-2 justify-end">
+                        <ActionButton
+                          company={company}
+                          onProcess={() => handleProcess(company.id)}
+                          onViewResults={() => handleViewResults(company)}
+                        />
+                        <Button variant="ghost" size="icon" onClick={() => handleDeleteCompany(company)}>
+                          <Trash2 className="h-4 w-4 text-red-600" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -432,7 +473,13 @@ export default function QuarterDetailPage() {
 
 // --- SUB-COMPONENTS ---
 
-const ReportStatusCell: FC<{ status: ReportStatus; onViewReport: () => void; quarter: string; companyName: string; onUploaded: (url: string)=>void }> = ({ status, onViewReport, quarter, companyName, onUploaded }) => {
+const ReportStatusCell: FC<{
+  reports: string[]
+  onViewReport: (url: string) => void
+  quarter: string
+  companyName: string
+  onUploaded: (url: string) => void
+}> = ({ reports, onViewReport, quarter, companyName, onUploaded }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const handleSelect = () => fileInputRef.current?.click()
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -452,29 +499,40 @@ const ReportStatusCell: FC<{ status: ReportStatus; onViewReport: () => void; qua
       console.error("upload failed", err)
     }
   }
-  if (status === "Received") {
-    return (
-      <div className="flex items-center gap-2">
-        <span className="flex items-center gap-1.5 text-green-700">
-          <CheckCircle2 className="h-4 w-4" />
-          <span className="font-medium">Received</span>
-        </span>
-        <Button variant="link" size="sm" className="p-0 h-auto" onClick={onViewReport}>
-          View
-        </Button>
-      </div>
-    )
-  }
+  const hasReports = reports.length > 0
+
   return (
-    <div className="flex items-center gap-2">
-      <span className="flex items-center gap-1.5 text-amber-700">
-        <Clock className="h-4 w-4" />
-        <span className="font-medium">Awaiting</span>
-      </span>
+    <div className="flex items-center gap-2 flex-wrap">
+      {hasReports ? (
+        <>
+          {reports.map((url, idx) => {
+            const rawPart = url.split("/").pop() || ""
+            const decoded = decodeURIComponent(rawPart)
+            const name = decoded.split("/").pop() || `Doc ${idx + 1}`
+            return (
+              <Button
+                key={idx}
+                variant="secondary"
+                size="sm"
+                className="h-6 text-xs px-2 py-1"
+                onClick={() => onViewReport(url)}
+              >
+                <FileText className="h-3 w-3 mr-1" />
+                {name.length > 20 ? name.slice(0, 17) + "…" : name}
+              </Button>
+            )
+          })}
+        </>
+      ) : (
+        <span className="flex items-center gap-1.5 text-amber-700">
+          <Clock className="h-4 w-4" />
+          <span className="font-medium">Awaiting</span>
+        </span>
+      )}
       <input type="file" accept="application/pdf" className="hidden" ref={fileInputRef} onChange={handleChange} />
-      <Button variant="outline" size="sm" className="h-7 bg-transparent" onClick={handleSelect}>
-        <Upload className="h-3 w-3 mr-1.5" />
-        Upload
+      <Button variant="outline" size="sm" className="h-6 bg-transparent" onClick={handleSelect}>
+        <Upload className="h-3 w-3 mr-1" />
+        {hasReports ? "Add" : "Upload"}
       </Button>
     </div>
   )
@@ -505,12 +563,16 @@ const AddCompanyForm: FC<{ value: string; onChange: (value: string) => void; onA
 const MetricTemplateSelector: FC<{
   selectedTemplate: string | null
   onSelect: (templateId: string | null) => void
-}> = ({ selectedTemplate, onSelect }) => {
+  docs: string[]
+}> = ({ selectedTemplate, onSelect, docs }) => {
   const [templates, setTemplates] = useState<string[]>([])
-  const [rows, setRows] = useState<{ metric: string; custom_instruction: string }[]>([{
-    metric: "",
-    custom_instruction: "",
-  }])
+  const [rows, setRows] = useState<{ metric: string; custom_instruction: string; docUrl: string }[]>([
+    {
+      metric: "",
+      custom_instruction: "",
+      docUrl: docs[0] || "",
+    },
+  ])
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
 
@@ -532,8 +594,12 @@ const MetricTemplateSelector: FC<{
     return () => window.removeEventListener("templates-updated", handler)
   }, [])
 
-  const addRow = () => setRows([...rows, { metric: "", custom_instruction: "" }])
-  const updateRow = (index: number, field: "metric" | "custom_instruction", value: string) => {
+  const addRow = () => setRows([...rows, { metric: "", custom_instruction: "", docUrl: docs[0] || "" }])
+  const updateRow = (
+    index: number,
+    field: "metric" | "custom_instruction" | "docUrl",
+    value: string,
+  ) => {
     setRows((prev) => prev.map((r, i) => (i === index ? { ...r, [field]: value } : r)))
   }
 
@@ -554,7 +620,7 @@ const MetricTemplateSelector: FC<{
     lines.forEach((line, i) => {
       const cols = line.split("\t")
       const target = startRow + i
-      if (target >= newRows.length) newRows.push({ metric: "", custom_instruction: "" })
+      if (target >= newRows.length) newRows.push({ metric: "", custom_instruction: "", docUrl: docs[0] || "" })
 
       // Paste starting column then fill to the right
       if (colIndex === 0) {
@@ -569,19 +635,71 @@ const MetricTemplateSelector: FC<{
   }
 
   const saveTemplate = async (templateName: string) => {
-    if (!templateName.trim()) return
+    const trimmed = templateName.trim()
+    if (!trimmed) {
+      toast({
+        variant: "destructive",
+        title: "Missing Template Name",
+        description: "Please provide a template name before saving.",
+      })
+      return
+    }
+
+    // Prevent duplicate names (case-insensitive) unless we are editing the same template
+    const duplicateExists = templates.some(
+      (t) => t.toLowerCase() === trimmed.toLowerCase() && t.toLowerCase() !== (editingTemplate || "").toLowerCase(),
+    )
+
+    if (duplicateExists) {
+      toast({
+        variant: "destructive",
+        title: "Duplicate Template",
+        description: `A template named "${trimmed}" already exists. Please choose another name.`,
+      })
+      return
+    }
+
     try {
-      await fetch("/api/metric-templates", {
+      const resp = await fetch("/api/metric-templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: templateName.trim(), metrics: rows }),
+        body: JSON.stringify({ name: trimmed, metrics: rows }),
       })
+
+      if (!resp.ok) {
+        const message = resp.status === 409 ?
+          `A template named "${trimmed}" already exists.` :
+          "Failed to save the template. Please try again.";
+        toast({ variant: "destructive", title: "Error Saving Template", description: message })
+        return
+      }
+
       await loadTemplates()
       setIsDialogOpen(false)
       // Notify other selectors to refresh
       window.dispatchEvent(new Event("templates-updated"))
     } catch (err) {
       console.error("Failed to save template", err)
+      toast({ variant: "destructive", title: "Network Error", description: "Could not save template. Please try again." })
+    }
+  }
+
+  const deleteTemplate = async (templateName: string) => {
+    if (!window.confirm(`Are you sure you want to delete the template \"${templateName}\"?`)) return
+    try {
+      const resp = await fetch(`/api/metric-templates/${encodeURIComponent(templateName)}`, {
+        method: "DELETE",
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      await loadTemplates()
+      // If the deleted template was selected, clear selection
+      if (selectedTemplate && selectedTemplate.toLowerCase() === templateName.toLowerCase()) {
+        onSelect(null)
+      }
+      toast({ title: "Template Deleted", description: `${templateName} removed successfully.` })
+    } catch (err) {
+      console.error("Failed to delete template", err)
+      toast({ variant: "destructive", title: "Delete Failed", description: "Could not delete template." })
     }
   }
 
@@ -598,20 +716,37 @@ const MetricTemplateSelector: FC<{
         <SelectTrigger className="w-[220px]">
           <SelectValue placeholder="Select a template" />
         </SelectTrigger>
-        <SelectContent>
+        <SelectContent className="z-50">
           <SelectItem value="none">None</SelectItem>
           {templates.map((name) => (
-            <SelectItem key={name} value={name} className="pr-10">{/* leave room for icon */}
+            <SelectItem key={name} value={name} className="pr-14 relative group">
               {name}
               <span
-                className="absolute right-2 cursor-pointer"
+                className="absolute right-8 top-1/2 -translate-y-1/2 cursor-pointer flex items-center opacity-0 group-hover:opacity-100"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onPointerUp={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
                 onClick={async (e) => {
                   e.stopPropagation()
                   try {
                     const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
                     const data = await resp.json()
-                    const metrics = (data.metrics || []) as { metric: string; custom_instruction: string }[]
-                    setRows(metrics.length ? metrics : [{ metric: "", custom_instruction: "" }])
+                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; docUrl?: string }[]
+                    const normalized = metricsRaw.map((m) => ({
+                      metric: m.metric,
+                      custom_instruction: m.custom_instruction,
+                      docUrl: m.docUrl || docs[0] || "",
+                    }))
+                    setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "" }])
                     setEditingTemplate(name)
                     setIsDialogOpen(true)
                   } catch (err) {
@@ -620,6 +755,27 @@ const MetricTemplateSelector: FC<{
                 }}
               >
                 <Edit className="h-4 w-4 text-gray-500 hover:text-gray-700" />
+              </span>
+              <span
+                className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer flex items-center opacity-0 group-hover:opacity-100"
+                onPointerDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onPointerUp={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onClick={async (e) => {
+                  e.stopPropagation()
+                  await deleteTemplate(name)
+                }}
+              >
+                <Trash2 className="h-4 w-4 text-red-500 hover:text-red-700" />
               </span>
             </SelectItem>
           ))}
@@ -650,6 +806,7 @@ const MetricTemplateSelector: FC<{
                 <TableRow>
                   <TableHead>Metric Name</TableHead>
                   <TableHead>Extraction Instruction</TableHead>
+                  <TableHead>Document</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -679,6 +836,30 @@ const MetricTemplateSelector: FC<{
                       onPaste={(e) => handlePaste(e as any, index, 1)}
                     >
                       {row.custom_instruction}
+                    </TableCell>
+
+                    {/* Document selection */}
+                    <TableCell className="align-top w-40">
+                      <Select
+                        value={row.docUrl}
+                        onValueChange={(val) => updateRow(index, "docUrl", val)}
+                      >
+                        <SelectTrigger className="w-full h-8">
+                          <SelectValue placeholder="Select" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {docs.map((d) => {
+                            const raw = d.split("/").pop() || ""
+                            const decoded = decodeURIComponent(raw)
+                            const name = decoded.split("/").pop() || "Doc"
+                            return (
+                              <SelectItem key={d} value={d} className="truncate">
+                                {name}
+                              </SelectItem>
+                            )
+                          })}
+                        </SelectContent>
+                      </Select>
                     </TableCell>
 
                     <TableCell className="w-8 align-top">
@@ -808,7 +989,7 @@ const VerificationSheet: FC<{
           </div>
           <div className="flex-grow p-6 overflow-hidden relative">
             <Image
-              src={company.reportUrl || "/placeholder.svg?height=800&width=600"}
+              src={company.reportUrls[0] || "/placeholder.svg?height=800&width=600"}
               alt="Financial Report"
               layout="fill"
               objectFit="contain"
