@@ -1214,7 +1214,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
         backgroundColor: "rgba(255,0,0,0.25)",
         pointerEvents: "none",
         left: `${(bbox[0] / PAGE_WIDTH_PT) * 100}%`,
-        top: `${((PAGE_HEIGHT_PT - bbox[3]) / PAGE_HEIGHT_PT) * 100}%`,
+        top: `${(bbox[1] / PAGE_HEIGHT_PT) * 100}%`,
         width: `${((bbox[2] - bbox[0]) / PAGE_WIDTH_PT) * 100}%`,
         height: `${((bbox[3] - bbox[1]) / PAGE_HEIGHT_PT) * 100}%`,
       }
