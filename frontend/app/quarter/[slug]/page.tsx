@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, type FC, useEffect } from "react"
-import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, ChevronUp, ChevronDown, Trash2 } from "lucide-react"
+import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -1126,7 +1126,7 @@ interface ResultsSheetProps {
 const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, quarterTitle, onCompanyVerified }) => {
   const [results, setResults] = useState<Record<string, any> | null>(null)
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
-  const [pageIndex, setPageIndex] = useState(0)
+  // pageIndex removed – we now always jump directly to the correct page via PDF hash param
   const [verifiedMap, setVerifiedMap] = useState<Record<string, boolean>>({})
   const [isExporting, setIsExporting] = useState(false)
   const verifiedSentRef = useRef(false)
@@ -1147,7 +1147,6 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
         setResults(data)
         const firstMetric = Object.keys(data)[0]
         setSelectedMetric(firstMetric)
-        setPageIndex(0)
       } catch (err) {
         console.error(err)
       }
@@ -1188,16 +1187,40 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   useEffect(() => { verifiedSentRef.current = false }, [company?.id])
 
   const metricData = selectedMetric && results ? results[selectedMetric] : null
-  const pages: number[] = metricData?.citation_page_numbers || []
-  const citationUrl: string | null = metricData?.citation_blob_path || null
+  // --------------------------------------------------------------------
+  // Adapt to new results structure
+  // --------------------------------------------------------------------
+  const firstCitation = metricData?.citation_coords?.[0] || null
+  const pageNumber: number | null = firstCitation ? firstCitation.page : null
+  const bbox: number[] | null = firstCitation ? firstCitation.coords : null // [x1, y1, x2, y2]
 
-  const goPrev = () => setPageIndex((i) => Math.max(0, i - 1))
-  const goNext = () => setPageIndex((i) => Math.min(pages.length - 1, i + 1))
+  // The original report PDF lives on the company object (first uploaded report)
+  const reportUrl: string | null = company?.reportUrls?.[0] || null
 
-  // Build URL hash parameters so that the thumbnails/sidebar panel is hidden by default (navpanes=0)
-  // Reference: https://pdfobject.com/pdf/pdf_open_parameters_acro8.pdf — using the navpanes parameter works in Chrome/Firefox PDF viewers
-  const baseHash = "#navpanes=0" // hide navigation panes (thumbnails/bookmarks)
-  const pageParam = pages.length ? `${baseHash}&page=${pages[pageIndex]}` : baseHash
+  // Build URL hash so that thumbnails/bookmarks are hidden and we open the correct page.
+  // "page" param is 1-based.
+  // Chrome/Firefox respect only the first open-parameter in the hash. Therefore "page" MUST come first.
+  const pageParam = pageNumber ? `#page=${pageNumber}&navpanes=0` : "#navpanes=0"
+
+  // Constants for an A4 PDF in pt. We use these to convert the coordinates returned by the
+  // backend (which are in PDF pts) into percentage values so we can overlay a div.
+  const PAGE_WIDTH_PT = 595 // points
+  const PAGE_HEIGHT_PT = 842 // points
+
+  const highlightStyle: React.CSSProperties | undefined = bbox
+    ? {
+        position: "absolute",
+        border: "2px solid rgba(255,0,0,0.8)",
+        backgroundColor: "rgba(255,0,0,0.25)",
+        pointerEvents: "none",
+        left: `${(bbox[0] / PAGE_WIDTH_PT) * 100}%`,
+        top: `${((PAGE_HEIGHT_PT - bbox[3]) / PAGE_HEIGHT_PT) * 100}%`,
+        width: `${((bbox[2] - bbox[0]) / PAGE_WIDTH_PT) * 100}%`,
+        height: `${((bbox[3] - bbox[1]) / PAGE_HEIGHT_PT) * 100}%`,
+      }
+    : undefined
+
+  // no-op – pageIndex removed
 
   /* --------------------------------------------------------------------
    * Export to Excel handler
@@ -1272,7 +1295,6 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                       className={`w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
                       onClick={() => {
                         setSelectedMetric(m)
-                        setPageIndex(0)
                       }}
                     >
                       <div className="font-medium relative">
@@ -1296,7 +1318,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
 
         {/* Right PDF viewer */}
         <div className="w-3/4 flex flex-col bg-gray-100">
-          {citationUrl ? (
+          {reportUrl ? (
             <div className="flex-grow relative">
               {/* Close button overlay (bottom-right) */}
               <Button
@@ -1309,25 +1331,18 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
               </Button>
 
               <iframe
-                src={`${citationUrl}${pageParam}`}
-                title="Citation PDF"
+                key={`page-${pageNumber ?? 0}`}
+                src={`${reportUrl}${pageParam}`}
+                title="Financial Report"
                 className="w-full h-full"
               />
 
-              {pages.length > 1 && (
-                <div className="absolute bottom-4 right-16 flex gap-2">
-                  {/* positioned slightly left to accommodate close button */}
-                  <Button size="icon" variant="secondary" onClick={goPrev} disabled={pageIndex === 0}>
-                    <ChevronUp className="h-4 w-4" />
-                  </Button>
-                  <Button size="icon" variant="secondary" onClick={goNext} disabled={pageIndex === pages.length - 1}>
-                    <ChevronDown className="h-4 w-4" />
-                  </Button>
-                </div>
+              {highlightStyle && (
+                <div style={highlightStyle} />
               )}
             </div>
           ) : (
-            <div className="flex-grow flex items-center justify-center text-gray-500">No citation available</div>
+            <div className="flex-grow flex items-center justify-center text-gray-500">No report available</div>
           )}
         </div>
       </SheetContent>
