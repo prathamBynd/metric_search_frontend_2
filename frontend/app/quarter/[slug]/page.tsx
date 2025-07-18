@@ -943,7 +943,11 @@ const VerificationSheet: FC<{
 
   return (
     <Sheet open={isOpen} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw] p-0 flex [&>button[data-radix-sheet-close]]:hidden">
+      <SheetContent
+        className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw] p-0 flex
+        [&_button[data-radix-sheet-close]]:hidden
+        [&_button[data-radix-dialog-close]]:hidden"
+      >
         {/* Hidden title for accessibility */}
         <SheetHeader className="sr-only">
           <SheetTitle>Extraction Results</SheetTitle>
@@ -1164,16 +1168,36 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!isOpen) return
+      // Space: verify current metric and advance
       if (e.code === "Space" && selectedMetric) {
         e.preventDefault()
         setVerifiedMap((prev) => ({ ...prev, [selectedMetric]: true }))
-        // move to next metric
         if (results) {
           const keys = Object.keys(results)
           const idx = keys.indexOf(selectedMetric)
           if (idx < keys.length - 1) {
             setSelectedMetric(keys[idx + 1])
+            setScrollSignal((s) => s + 1)
           }
+        }
+        return
+      }
+
+      // Arrow navigation without verification
+      if (results && ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(e.code)) {
+        e.preventDefault()
+        if (!selectedMetric) return
+        const keys = Object.keys(results)
+        const idx = keys.indexOf(selectedMetric)
+        let newIdx = idx
+        if ((e.code === "ArrowDown" || e.code === "ArrowRight") && idx < keys.length - 1) {
+          newIdx = idx + 1
+        } else if ((e.code === "ArrowUp" || e.code === "ArrowLeft") && idx > 0) {
+          newIdx = idx - 1
+        }
+        if (newIdx !== idx) {
+          setSelectedMetric(keys[newIdx])
+          setScrollSignal((s) => s + 1)
         }
       }
     }
@@ -1258,7 +1282,10 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
 
   return (
     <Sheet open={isOpen} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw] p-0 flex [&>button[data-radix-sheet-close]]:hidden">
+      <SheetContent
+        className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw] p-0 flex
+        [&>button]:hidden"
+      >
         {/* Hidden title for accessibility */}
         <SheetHeader className="sr-only">
           <SheetTitle>Extraction Results</SheetTitle>
@@ -1289,21 +1316,19 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                 return (
                   <li key={m}>
                     <button
-                      className={`w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
+                      className={`relative w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
                       onClick={() => {
                         setSelectedMetric(m)
                         setScrollSignal((s) => s + 1)
                       }}
                     >
-                      <div className="font-medium relative">
-                        {m}
-                        {!verifiedMap[m] ? (
-                          <span className="absolute -right-2 -top-2 h-2 w-2 rounded-full bg-amber-400" />
-                        ) : (
-                          <CheckCircle2 className="absolute -right-3 -top-3 h-3 w-3 text-green-600" />
-                        )}
-                      </div>
+                      <div className="font-medium">{m}</div>
                       {infoLine && <div className="text-xs text-gray-600 mt-0.5">{infoLine}</div>}
+                      {!verifiedMap[m] ? (
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-amber-400" />
+                      ) : (
+                        <CheckCircle2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-green-600" />
+                      )}
                     </button>
                   </li>
                 )
