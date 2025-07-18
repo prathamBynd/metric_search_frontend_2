@@ -2,6 +2,10 @@
 
 import { useState, useRef, type FC, useEffect } from "react"
 import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, Trash2 } from "lucide-react"
+import dynamic from "next/dynamic"
+
+// Dynamically import PDF viewer so it only renders on the client (avoids DOM APIs on the server)
+const PdfScrollViewer = dynamic(() => import("@/components/pdf-scroll-viewer"), { ssr: false })
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
@@ -1126,6 +1130,8 @@ interface ResultsSheetProps {
 const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, quarterTitle, onCompanyVerified }) => {
   const [results, setResults] = useState<Record<string, any> | null>(null)
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
+  // Incrementing this triggers the PDF viewer to scroll even if the page number hasn’t changed.
+  const [scrollSignal, setScrollSignal] = useState(0)
   // pageIndex removed – we now always jump directly to the correct page via PDF hash param
   const [verifiedMap, setVerifiedMap] = useState<Record<string, boolean>>({})
   const [isExporting, setIsExporting] = useState(false)
@@ -1147,6 +1153,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
         setResults(data)
         const firstMetric = Object.keys(data)[0]
         setSelectedMetric(firstMetric)
+        setScrollSignal((s) => s + 1)
       } catch (err) {
         console.error(err)
       }
@@ -1197,30 +1204,18 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   // The original report PDF lives on the company object (first uploaded report)
   const reportUrl: string | null = company?.reportUrls?.[0] || null
 
-  // Build URL hash so that thumbnails/bookmarks are hidden and we open the correct page.
-  // "page" param is 1-based.
-  // Chrome/Firefox respect only the first open-parameter in the hash. Therefore "page" MUST come first.
-  const pageParam = pageNumber ? `#page=${pageNumber}&navpanes=0` : "#navpanes=0"
+  // Highlight rectangle will now be calculated inside PdfScrollViewer using
+  // PDF.js viewport helpers. We just pass the raw Fitz coordinates when the
+  // user selects a metric.
 
-  // Constants for an A4 PDF in pt. We use these to convert the coordinates returned by the
-  // backend (which are in PDF pts) into percentage values so we can overlay a div.
-  const PAGE_WIDTH_PT = 595 // points
-  const PAGE_HEIGHT_PT = 842 // points
+  type PdfHighlight = {
+    page: number
+    coords: number[]
+  }
 
-  const highlightStyle: React.CSSProperties | undefined = bbox
-    ? {
-        position: "absolute",
-        border: "2px solid rgba(255,0,0,0.8)",
-        backgroundColor: "rgba(255,0,0,0.25)",
-        pointerEvents: "none",
-        left: `${(bbox[0] / PAGE_WIDTH_PT) * 100}%`,
-        top: `${(bbox[1] / PAGE_HEIGHT_PT) * 100}%`,
-        width: `${((bbox[2] - bbox[0]) / PAGE_WIDTH_PT) * 100}%`,
-        height: `${((bbox[3] - bbox[1]) / PAGE_HEIGHT_PT) * 100}%`,
-      }
-    : undefined
+  // The highlight remains visible; no timeout required.
 
-  // no-op – pageIndex removed
+  const highlight: PdfHighlight | null = bbox && pageNumber != null ? { page: pageNumber, coords: bbox } : null
 
   /* --------------------------------------------------------------------
    * Export to Excel handler
@@ -1295,6 +1290,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                       className={`w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
                       onClick={() => {
                         setSelectedMetric(m)
+                        setScrollSignal((s) => s + 1)
                       }}
                     >
                       <div className="font-medium relative">
@@ -1330,16 +1326,13 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                 <X className="h-5 w-5" />
               </Button>
 
-              <iframe
-                key={`page-${pageNumber ?? 0}`}
-                src={`${reportUrl}${pageParam}`}
-                title="Financial Report"
-                className="w-full h-full"
+              {/* PDF with smooth scroll & automatic viewport-based highlight */}
+              <PdfScrollViewer
+                fileUrl={reportUrl}
+                targetPage={pageNumber}
+                scrollSignal={scrollSignal}
+                highlight={highlight}
               />
-
-              {highlightStyle && (
-                <div style={highlightStyle} />
-              )}
             </div>
           ) : (
             <div className="flex-grow flex items-center justify-center text-gray-500">No report available</div>
