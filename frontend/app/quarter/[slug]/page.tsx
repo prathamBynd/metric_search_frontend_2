@@ -1202,7 +1202,9 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   const bbox: number[] | null = firstCitation ? firstCitation.coords : null // [x1, y1, x2, y2]
 
   // The original report PDF lives on the company object (first uploaded report)
-  const reportUrl: string | null = company?.reportUrls?.[0] || null
+  const rawReportUrl: string | null = company?.reportUrls?.[0] || null
+  // Proxy through our Next.js API to bypass Azure Blob CORS restrictions
+  const reportUrl: string | null = rawReportUrl ? `/api/proxy?url=${encodeURIComponent(rawReportUrl)}` : null
 
   // Highlight rectangle will now be calculated inside PdfScrollViewer using
   // PDF.js viewport helpers. We just pass the raw Fitz coordinates when the
@@ -1327,12 +1329,14 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
               </Button>
 
               {/* PDF with smooth scroll & automatic viewport-based highlight */}
-              <PdfScrollViewer
-                fileUrl={reportUrl}
-                targetPage={pageNumber}
-                scrollSignal={scrollSignal}
-                highlight={highlight}
-              />
+              {reportUrl && (
+                <PdfScrollViewer
+                  fileUrl={reportUrl}
+                  targetPage={pageNumber}
+                  scrollSignal={scrollSignal}
+                  highlight={highlight}
+                />
+              )}
             </div>
           ) : (
             <div className="flex-grow flex items-center justify-center text-gray-500">No report available</div>
