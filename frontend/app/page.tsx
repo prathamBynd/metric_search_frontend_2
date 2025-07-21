@@ -324,7 +324,7 @@ const MetricTemplateModal: FC<MetricTemplateModalProps> = ({ onSaved, onClose })
   }
 
   return (
-    <DialogContent className="sm:max-w-[700px]">
+    <DialogContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw]">
       <DialogHeader>
         <DialogTitle>Create Metric Template</DialogTitle>
       </DialogHeader>

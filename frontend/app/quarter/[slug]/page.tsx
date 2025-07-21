@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, type FC, useEffect } from "react"
+import { useState, useRef, type FC, useEffect, useTransition } from "react"
 import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, Trash2 } from "lucide-react"
 import dynamic from "next/dynamic"
 
@@ -558,6 +558,7 @@ const MetricTemplateSelector: FC<{
   ])
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
+  const [isPendingRowsUpdate, startRowsTransition] = useTransition()
 
   const loadTemplates = async () => {
     try {
@@ -583,7 +584,9 @@ const MetricTemplateSelector: FC<{
     field: "metric" | "custom_instruction" | "docUrl",
     value: string,
   ) => {
-    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, [field]: value } : r)))
+    startRowsTransition(() => {
+      setRows((prev) => prev.map((r, i) => (i === index ? { ...r, [field]: value } : r)))
+    })
   }
 
   // Handle Excel-style paste (tab-separated rows / columns)
@@ -779,7 +782,7 @@ const MetricTemplateSelector: FC<{
       </Select>
 
       {/* Modal */}
-      <DialogContent className="sm:max-w-[700px]">
+      <DialogContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw]">
         <DialogHeader>
           <DialogTitle>{editingTemplate ? `Edit Template – ${editingTemplate}` : "Create Metric Template"}</DialogTitle>
         </DialogHeader>
@@ -811,7 +814,11 @@ const MetricTemplateSelector: FC<{
                       suppressContentEditableWarning
                       className="outline-none w-full min-w-[180px] px-2 py-1 align-top border-r border-gray-200"
                       style={{ width: "30%" }}
-                      onBlur={(e) => updateRow(index, "metric", (e.target as HTMLElement).innerText)}
+                      onBlur={(e) => {
+                        const text = (e.target as HTMLElement).innerText
+                        // Defer state update so the next cell can receive focus before re-render
+                        setTimeout(() => updateRow(index, "metric", text), 0)
+                      }}
                       onPaste={(e) => handlePaste(e as any, index, 0)}
                     >
                       {row.metric}
@@ -822,7 +829,10 @@ const MetricTemplateSelector: FC<{
                       contentEditable
                       suppressContentEditableWarning
                       className="outline-none w-full px-2 py-1 align-top"
-                      onBlur={(e) => updateRow(index, "custom_instruction", (e.target as HTMLElement).innerText)}
+                      onBlur={(e) => {
+                        const text = (e.target as HTMLElement).innerText
+                        setTimeout(() => updateRow(index, "custom_instruction", text), 0)
+                      }}
                       onPaste={(e) => handlePaste(e as any, index, 1)}
                     >
                       {row.custom_instruction}
