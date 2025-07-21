@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, type FC, useEffect, useTransition } from "react"
+import { useState, useRef, type FC, useEffect, useTransition, useMemo } from "react"
 import { Check, CheckCircle2, Clock, Edit, FileText, Loader2, Plus, Save, Upload, X, XCircle, Trash2 } from "lucide-react"
 import dynamic from "next/dynamic"
 
@@ -378,6 +378,19 @@ export default function QuarterDetailPage() {
                             ),
                           )
                         }}
+                        onRemoved={(url) => {
+                          setCompanies((prev) =>
+                            prev.map((c) => {
+                              if (c.id !== company.id) return c
+                              const updatedUrls = c.reportUrls.filter((u) => u !== url)
+                              return {
+                                ...c,
+                                reportUrls: updatedUrls,
+                                reportStatus: updatedUrls.length > 0 ? c.reportStatus : "Not Received",
+                              }
+                            }),
+                          )
+                        }}
                       />
                     </TableCell>
                     <TableCell>
@@ -462,7 +475,8 @@ const ReportStatusCell: FC<{
   quarter: string
   companyName: string
   onUploaded: (url: string) => void
-}> = ({ reports, onViewReport, quarter, companyName, onUploaded }) => {
+  onRemoved: (url: string) => void
+}> = ({ reports, onViewReport, quarter, companyName, onUploaded, onRemoved }) => {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const handleSelect = () => fileInputRef.current?.click()
   const handleChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -493,16 +507,41 @@ const ReportStatusCell: FC<{
             const decoded = decodeURIComponent(rawPart)
             const name = decoded.split("/").pop() || `Doc ${idx + 1}`
             return (
-              <Button
-                key={idx}
-                variant="secondary"
-                size="sm"
-                className="h-6 text-xs px-2 py-1"
-                onClick={() => onViewReport(url)}
-              >
-                <FileText className="h-3 w-3 mr-1" />
-                {name.length > 20 ? name.slice(0, 17) + "…" : name}
-              </Button>
+              <div key={idx} className="relative inline-block">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-6 text-xs px-2 py-1 pr-6"
+                  onClick={() => onViewReport(url)}
+                >
+                  <FileText className="h-3 w-3 mr-1" />
+                  {name.length > 20 ? name.slice(0, 17) + "…" : name}
+                </Button>
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    try {
+                      // derive blob path relative to container
+                      const prefix = "https://byndpdfstorage.blob.core.windows.net/metric-workflow/"
+                      const encodedPath = url.startsWith(prefix) ? url.slice(prefix.length) : null
+                      if (!encodedPath) return
+                      const resp = await fetch("/api/upload-report", {
+                        method: "DELETE",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ blobPath: encodedPath }),
+                      })
+                      if (!resp.ok) throw new Error("Delete failed")
+                      onRemoved(url)
+                    } catch (err) {
+                      console.error(err)
+                    }
+                  }}
+                  className="absolute right-0 top-0 -translate-y-1/2 translate-x-1/2 bg-white rounded-full p-0.5 hover:bg-red-100"
+                >
+                  <X className="h-3 w-3 text-red-600" />
+                </button>
+              </div>
             )
           })}
         </>
@@ -1151,6 +1190,20 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   const [isExporting, setIsExporting] = useState(false)
   const verifiedSentRef = useRef(false)
 
+  // ------------------------------------------------------------------
+  // Pre-load and keep every distinct PDF mounted so switching is instant
+  // ------------------------------------------------------------------
+  const pdfUrls = useMemo(() => {
+    if (!results || !company) return [] as string[]
+    const rawUrls = Object.values(results).map((r: any) =>
+      (r?.citation_blob_path as string | null) ?? company.reportUrls?.[0] ?? null,
+    )
+    const proxied = rawUrls
+      .filter(Boolean)
+      .map((raw) => `/api/proxy?url=${encodeURIComponent(raw as string)}`)
+    return Array.from(new Set(proxied))
+  }, [results, company])
+
   useEffect(() => {
     if (!company || !company.template) return
     async function fetchResults() {
@@ -1163,9 +1216,11 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
         })
         const resp = await fetch(`/api/results?${qs.toString()}`)
         if (!resp.ok) throw new Error("Failed to fetch results.json")
-        const data = await resp.json()
-        setResults(data)
-        const firstMetric = Object.keys(data)[0]
+        const payload = await resp.json()
+        // Unwrap when the response is structured as { data: { ...metrics } }
+        const metricsData = payload?.data ?? payload
+        setResults(metricsData)
+        const firstMetric = Object.keys(metricsData)[0]
         setSelectedMetric(firstMetric)
         setScrollSignal((s) => s + 1)
       } catch (err) {
@@ -1235,8 +1290,8 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   const pageNumber: number | null = firstCitation ? firstCitation.page : null
   const bbox: number[] | null = firstCitation ? firstCitation.coords : null // [x1, y1, x2, y2]
 
-  // The original report PDF lives on the company object (first uploaded report)
-  const rawReportUrl: string | null = company?.reportUrls?.[0] || null
+  // Prefer the PDF associated with the currently selected metric (if any)
+  const rawReportUrl: string | null = metricData?.citation_blob_path || company?.reportUrls?.[0] || null
   // Proxy through our Next.js API to bypass Azure Blob CORS restrictions
   const reportUrl: string | null = rawReportUrl ? `/api/proxy?url=${encodeURIComponent(rawReportUrl)}` : null
 
@@ -1351,7 +1406,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
 
         {/* Right PDF viewer */}
         <div className="w-3/4 flex flex-col bg-gray-100">
-          {reportUrl ? (
+          {pdfUrls.length > 0 ? (
             <div className="flex-grow relative">
               {/* Close button overlay (bottom-right) */}
               <Button
@@ -1363,15 +1418,20 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                 <X className="h-5 w-5" />
               </Button>
 
-              {/* PDF with smooth scroll & automatic viewport-based highlight */}
-              {reportUrl && (
-                <PdfScrollViewer
-                  fileUrl={reportUrl}
-                  targetPage={pageNumber}
-                  scrollSignal={scrollSignal}
-                  highlight={highlight}
-                />
-              )}
+              {/* Keep all PDFs mounted; show only the active one */}
+              {pdfUrls.map((url) => {
+                const isActive = url === reportUrl
+                return (
+                  <div key={url} className={`absolute inset-0 ${isActive ? "" : "hidden"}`}>
+                    <PdfScrollViewer
+                      fileUrl={url}
+                      targetPage={isActive ? pageNumber : null}
+                      scrollSignal={isActive ? scrollSignal : undefined}
+                      highlight={isActive ? highlight : null}
+                    />
+                  </div>
+                )
+              })}
             </div>
           ) : (
             <div className="flex-grow flex items-center justify-center text-gray-500">No report available</div>

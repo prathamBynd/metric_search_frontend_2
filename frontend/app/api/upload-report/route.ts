@@ -32,4 +32,29 @@ export async function POST(req: NextRequest) {
     console.error("upload failed", err)
     return NextResponse.json({ error: "upload failed" }, { status: 500 })
   }
+}
+
+export async function DELETE(req: NextRequest) {
+  let body: { blobPath?: string }
+  try {
+    body = await req.json()
+  } catch (err) {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+  }
+  const blobPath = body.blobPath?.trim()
+  if (!blobPath) {
+    return NextResponse.json({ error: "Missing blobPath" }, { status: 400 })
+  }
+
+  try {
+    const service = BlobServiceClient.fromConnectionString(getConn())
+    const container = service.getContainerClient(containerName)
+    const decodedPath = decodeURIComponent(blobPath)
+    const blobClient = container.getBlobClient(decodedPath)
+    await blobClient.deleteIfExists()
+    return NextResponse.json({ success: true })
+  } catch (err) {
+    console.error("delete failed", err)
+    return NextResponse.json({ error: "delete failed" }, { status: 500 })
+  }
 } 

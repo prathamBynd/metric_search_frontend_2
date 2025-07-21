@@ -6,6 +6,12 @@ import "react-pdf/dist/Page/TextLayer.css"
 import "react-pdf/dist/Page/AnnotationLayer.css"
 
 // -------------------------------------------------------------------
+// Configuration
+// -------------------------------------------------------------------
+// Amount of extra space (in screen pixels) to add around citation highlights
+const PADDING = 4
+
+// -------------------------------------------------------------------
 // Type helpers
 // -------------------------------------------------------------------
 /**
@@ -147,10 +153,10 @@ export default function PdfScrollViewer({ fileUrl, targetPage, className, scroll
       pointerEvents: "none",
       border: "2px solid rgba(0,128,255,0.9)",
       backgroundColor: "rgba(0,128,255,0.25)",
-      left: Math.min(vx1, vx2),
-      top: Math.min(vy1, vy2),
-      width: Math.abs(vx1 - vx2),
-      height: Math.abs(vy1 - vy2),
+      left: Math.min(vx1, vx2) - PADDING,
+      top: Math.min(vy1, vy2) - PADDING,
+      width: Math.abs(vx1 - vx2) + PADDING * 2,
+      height: Math.abs(vy1 - vy2) + PADDING * 2,
     })
   }, [highlight, pageWidth])
 
@@ -197,10 +203,10 @@ export default function PdfScrollViewer({ fileUrl, targetPage, className, scroll
                       pointerEvents: "none",
                       border: "2px solid rgba(0,128,255,0.9)",
                       backgroundColor: "rgba(0,128,255,0.25)",
-                      left: Math.min(vx1, vx2),
-                      top: Math.min(vy1, vy2),
-                      width: Math.abs(vx1 - vx2),
-                      height: Math.abs(vy1 - vy2),
+                      left: Math.min(vx1, vx2) - PADDING,
+                      top: Math.min(vy1, vy2) - PADDING,
+                      width: Math.abs(vx1 - vx2) + PADDING * 2,
+                      height: Math.abs(vy1 - vy2) + PADDING * 2,
                     })
                   }
 
