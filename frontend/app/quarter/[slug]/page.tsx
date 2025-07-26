@@ -218,6 +218,7 @@ export default function QuarterDetailPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          company_name: targetCompany.name,
           template_name: targetCompany.template,
           time_period: timePeriod,
         }),
@@ -1183,7 +1184,7 @@ interface ResultsSheetProps {
 const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, quarterTitle, onCompanyVerified }) => {
   const [results, setResults] = useState<Record<string, any> | null>(null)
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
-  // Incrementing this triggers the PDF viewer to scroll even if the page number hasn’t changed.
+  // Incrementing this triggers the PDF viewer to scroll even if the page number hasn't changed.
   const [scrollSignal, setScrollSignal] = useState(0)
   // pageIndex removed – we now always jump directly to the correct page via PDF hash param
   const [verifiedMap, setVerifiedMap] = useState<Record<string, boolean>>({})
@@ -1373,32 +1374,67 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
             </Button>
           </div>
           {results ? (
-            <ul>
-              {Object.keys(results).map((m) => {
-                const r = results[m] || {}
-                const infoParts = [r.unit, r.extracted_value, r.denomination].filter(Boolean)
-                const infoLine = infoParts.join(" ")
-                return (
-                  <li key={m}>
-                    <button
-                      className={`relative w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
-                      onClick={() => {
-                        setSelectedMetric(m)
-                        setScrollSignal((s) => s + 1)
-                      }}
-                    >
-                      <div className="font-medium">{m}</div>
-                      {infoLine && <div className="text-xs text-gray-600 mt-0.5">{infoLine}</div>}
-                      {!verifiedMap[m] ? (
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-amber-400" />
-                      ) : (
-                        <CheckCircle2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-green-600" />
-                      )}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+            <div>
+              {/* Build an ordered map of blob -> metrics preserving original metric order */}
+              {(() => {
+                const groupMap = new Map<string, string[]>()
+                Object.keys(results).forEach((metricName) => {
+                  const blobPath: string = results[metricName]?.citation_blob_path || "__unknown__"
+                  if (!groupMap.has(blobPath)) groupMap.set(blobPath, [])
+                  groupMap.get(blobPath)!.push(metricName)
+                })
+
+                // Render each group with a heading followed by its metrics
+                return Array.from(groupMap.entries()).map(([blobPath, metricNames]) => {
+                  // Derive a readable PDF filename from the blob URL
+                  const fileName = (() => {
+                    if (blobPath === "__unknown__") return "Unknown Document"
+                    try {
+                      const decoded = decodeURIComponent(blobPath)
+                      return decoded.split("/").pop() || decoded
+                    } catch {
+                      // Fallback if decoding fails
+                      return blobPath.split("/").pop() || blobPath
+                    }
+                  })()
+
+                  return (
+                    <div key={blobPath}>
+                      {/* Group heading */}
+                      <div className="px-4 py-2 bg-gray-50 border-t font-semibold text-xs text-gray-700 sticky top-0">
+                        {fileName}
+                      </div>
+                      <ul>
+                        {metricNames.map((m) => {
+                          const r = results[m] || {}
+                          const infoParts = [r.unit, r.extracted_value, r.denomination].filter(Boolean)
+                          const infoLine = infoParts.join(" ")
+                          return (
+                            <li key={m}>
+                              <button
+                                className={`relative w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
+                                onClick={() => {
+                                  setSelectedMetric(m)
+                                  setScrollSignal((s) => s + 1)
+                                }}
+                              >
+                                <div className="font-medium">{m}</div>
+                                {infoLine && <div className="text-xs text-gray-600 mt-0.5">{infoLine}</div>}
+                                {!verifiedMap[m] ? (
+                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-amber-400" />
+                                ) : (
+                                  <CheckCircle2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-green-600" />
+                                )}
+                              </button>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </div>
+                  )
+                })
+              })()}
+            </div>
           ) : (
             <div className="p-4 text-sm text-gray-500">Loading...</div>
           )}

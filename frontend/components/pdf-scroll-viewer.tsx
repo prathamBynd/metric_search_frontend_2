@@ -79,7 +79,7 @@ export default function PdfScrollViewer({ fileUrl, targetPage, className, scroll
   const pageProxies = useRef<(pdfjs.PDFPageProxy | null)[]>([])
 
   // Track latest container width (page width) so recalculations happen on resize
-  const latestPageWidthRef = useRef<number | undefined>()
+  const latestPageWidthRef = useRef<number | undefined>(undefined)
 
   const [numPages, setNumPages] = useState<number | null>(null)
 
