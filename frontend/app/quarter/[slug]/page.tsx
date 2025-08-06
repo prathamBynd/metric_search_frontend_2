@@ -72,11 +72,11 @@ const initialVerificationMetrics: VerificationMetric[] = [
 
 // Helper to convert slug like "fy25-q4" to "FY25 Q4"
 function slugToTitle(slug: string) {
-  const match = slug.match(/fy(\d{2})-q(\d)/i)
-  if (!match) return slug.replace(/-/g, " ")
+  const match = slug.match(/fy(\d{2})(?:-q(\d))?/i)
+  if (!match) return slug.replace(/-/g, " ").toUpperCase()
   const fy = match[1]
   const q = match[2]
-  return `FY${fy} Q${q}`.toUpperCase()
+  return q ? `FY${fy} Q${q}`.toUpperCase() : `FY${fy}`.toUpperCase()
 }
 
 // --- MAIN COMPONENT ---
@@ -209,12 +209,12 @@ export default function QuarterDetailPage() {
 
     // Helper to build quarter title and time period
     const quarterTitle = slugToTitle(params.slug)
-    const [fyPart, qPart] = quarterTitle.split(" ") // ["FY25", "Q4"]
-    const timePeriod = `${qPart}${fyPart}` // "Q4FY25"
+    const [fyPart, qPart] = quarterTitle.split(" ") as [string, string?] // ["FY25", "Q4?"]
+    const timePeriod = qPart ? `${qPart}${fyPart}` : fyPart // "Q4FY25" or "FY25"
 
     try {
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
-      const resp = await fetch(`${apiBase}/api/extract-metrics`, {
+      const resp = await fetch(`${apiBase}/api/extract-metrics-new`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1197,7 +1197,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   const pdfUrls = useMemo(() => {
     if (!results || !company) return [] as string[]
     const rawUrls = Object.values(results).map((r: any) =>
-      (r?.citation_blob_path as string | null) ?? company.reportUrls?.[0] ?? null,
+      (r?.citation_blob_path || r?.pdf_blob_path || company.reportUrls?.[0] || null) as string | null,
     )
     const proxied = rawUrls
       .filter(Boolean)
@@ -1292,7 +1292,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
   const bbox: number[] | null = firstCitation ? firstCitation.coords : null // [x1, y1, x2, y2]
 
   // Prefer the PDF associated with the currently selected metric (if any)
-  const rawReportUrl: string | null = metricData?.citation_blob_path || company?.reportUrls?.[0] || null
+  const rawReportUrl: string | null = metricData?.citation_blob_path || metricData?.pdf_blob_path || company?.reportUrls?.[0] || null
   // Proxy through our Next.js API to bypass Azure Blob CORS restrictions
   const reportUrl: string | null = rawReportUrl ? `/api/proxy?url=${encodeURIComponent(rawReportUrl)}` : null
 
@@ -1379,7 +1379,7 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
               {(() => {
                 const groupMap = new Map<string, string[]>()
                 Object.keys(results).forEach((metricName) => {
-                  const blobPath: string = results[metricName]?.citation_blob_path || "__unknown__"
+                  const blobPath: string = results[metricName]?.citation_blob_path || results[metricName]?.pdf_blob_path || "__unknown__"
                   if (!groupMap.has(blobPath)) groupMap.set(blobPath, [])
                   groupMap.get(blobPath)!.push(metricName)
                 })

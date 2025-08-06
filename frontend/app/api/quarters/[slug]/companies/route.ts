@@ -2,11 +2,11 @@ import { NextResponse } from "next/server"
 import { BlobServiceClient } from "@azure/storage-blob"
 
 function slugToTitle(slug: string) {
-  const match = slug.match(/fy(\d{2})-q(\d)/i)
-  if (!match) return slug.replace(/-/g, " ")
+  const match = slug.match(/fy(\d{2})(?:-q(\d))?/i)
+  if (!match) return slug.replace(/-/g, " ").toUpperCase()
   const fy = match[1]
   const q = match[2]
-  return `FY${fy} Q${q}`.toUpperCase()
+  return q ? `FY${fy} Q${q}`.toUpperCase() : `FY${fy}`.toUpperCase()
 }
 
 interface CompanyStatus {

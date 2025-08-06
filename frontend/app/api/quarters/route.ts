@@ -12,19 +12,21 @@ function toSlug(title: string) {
 }
 
 function getDescription(title: string) {
-  // Expecting format "FY25 Q1"
-  const match = title.match(/FY(\d{2})\s*Q(\d)/i)
+  // Accept "FY25" or "FY25 Q1"
+  const match = title.match(/FY(\d{2})(?:\s*Q(\d))?/i)
   if (!match) return ""
   const year = match[1]
   const quarter = match[2]
-  return `Financial Year 20${year} - Quarter ${quarter}`
+  return quarter
+    ? `Financial Year 20${year} - Quarter ${quarter}`
+    : `Financial Year 20${year}`
 }
 
 function sortQuarters(q1: string, q2: string) {
   const parse = (q: string) => {
-    const match = q.match(/FY(\d{2})\s*Q(\d)/i)
+    const match = q.match(/FY(\d{2})(?:\s*Q(\d))?/i)
     if (!match) return { year: 0, quarter: 0 }
-    return { year: parseInt(match[1], 10), quarter: parseInt(match[2], 10) }
+    return { year: parseInt(match[1], 10), quarter: match[2] ? parseInt(match[2], 10) : 0 }
   }
   const a = parse(q1)
   const b = parse(q2)
@@ -57,7 +59,8 @@ export async function GET() {
     // Keep only folders that match the expected pattern and do not contain encoded chars
     const filtered = quarterNames
       .filter((name) => !name.includes("%"))
-      .filter((name) => /^FY\d{2}\sQ\d$/i.test(name))
+      // Accept "FY23" or "FY23 Q4"
+      .filter((name) => /^FY\d{2}(?:\sQ\d)?$/i.test(name))
 
     filtered.sort(sortQuarters)
 
