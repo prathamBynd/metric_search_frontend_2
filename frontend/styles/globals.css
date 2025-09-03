@@ -1,3 +1,14 @@
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+/* Ensure modal content doesn't overflow viewport */
+.radix-themes__dialog-content,
+[data-state="open"][role="dialog"] .DialogContent,
+.DialogContent {
+  max-height: 90vh;
+  overflow: hidden;
+}
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

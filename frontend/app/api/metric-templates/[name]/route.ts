@@ -21,8 +21,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ name
     const blockBlob = container.getBlobClient(blobName)
     const download = await blockBlob.download()
     const text = await streamToString((download.readableStreamBody as any) || null)
-    const metrics = JSON.parse(text)
-    return NextResponse.json({ metrics })
+    const parsed = JSON.parse(text || "{}")
+    const excel_url = typeof parsed?.excel_url === "string" ? parsed.excel_url : null
+    const metrics = Array.isArray(parsed?.metrics) ? parsed.metrics : []
+    return NextResponse.json({ excel_url, metrics })
   } catch (err) {
     console.error("Error reading metric template", err)
     return NextResponse.json({ error: "Failed to read template" }, { status: 500 })

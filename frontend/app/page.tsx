@@ -301,6 +301,7 @@ const MetricTemplateModal: FC<MetricTemplateModalProps> = ({ onSaved, onClose })
   const [rows, setRows] = useState<{ metric: string; custom_instruction: string }[]>([
     { metric: "", custom_instruction: "" },
   ])
+  const [excelFile, setExcelFile] = useState<File | null>(null)
 
   const addRow = () => setRows([...rows, { metric: "", custom_instruction: "" }])
 
@@ -310,11 +311,18 @@ const MetricTemplateModal: FC<MetricTemplateModalProps> = ({ onSaved, onClose })
 
   const saveTemplate = async () => {
     if (!templateName.trim()) return
+    if (!excelFile) {
+      console.error("Excel file is required")
+      return
+    }
     try {
+      const fd = new FormData()
+      fd.append("name", templateName.trim())
+      fd.append("metrics", JSON.stringify(rows))
+      fd.append("excel", excelFile)
       await fetch("/api/metric-templates", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: templateName.trim(), metrics: rows }),
+        body: fd,
       })
       onSaved()
       onClose()
@@ -330,6 +338,13 @@ const MetricTemplateModal: FC<MetricTemplateModalProps> = ({ onSaved, onClose })
       </DialogHeader>
       <div className="space-y-4">
         <Input placeholder="Template Name" value={templateName} onChange={(e) => setTemplateName(e.target.value)} />
+        <div className="flex items-center gap-3">
+          <input
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={(e) => setExcelFile(e.target.files?.[0] || null)}
+          />
+        </div>
 
         <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
           <Table>

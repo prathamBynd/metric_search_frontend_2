@@ -183,6 +183,7 @@ export default function PdfScrollViewer({ fileUrl, targetPage, className, scroll
             <div style={{ position: "relative" }}>
               <Page
                 pageNumber={idx + 1}
+                renderAnnotationLayer={false}
                 width={pageWidth}
                 onLoadSuccess={(pdfPage) => {
                   // Save reference

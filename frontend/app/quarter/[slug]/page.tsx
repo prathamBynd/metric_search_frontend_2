@@ -21,6 +21,26 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useParams } from "next/navigation"
 import { toast } from "@/hooks/use-toast"
 
+// Build exact 2D grid preserving blank rows/cols and compute top-left offset from A1
+function buildGridAndOffset(ws: any, XLSX: any): { grid: any[][]; rowOffset: number; colOffset: number } {
+  const ref: string = ws["!ref"] || "A1"
+  const range = XLSX.utils.decode_range(ref)
+  const rowOffset = range.s.r
+  const colOffset = range.s.c
+  const numRows = range.e.r - range.s.r + 1
+  const numCols = range.e.c - range.s.c + 1
+  const grid: any[][] = new Array(numRows).fill(null).map(() => new Array(numCols).fill(""))
+  for (let r = 0; r < numRows; r++) {
+    for (let c = 0; c < numCols; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r: rowOffset + r, c: colOffset + c })
+      const cell = ws[cellRef]
+      const value = cell != null ? (cell.w != null ? cell.w : cell.v) : ""
+      grid[r][c] = value != null ? String(value) : ""
+    }
+  }
+  return { grid, rowOffset, colOffset }
+}
+
 // --- TYPES ---
 type ReportStatus = "Received" | "Not Received"
 type ExtractionStatus = "Idle" | "Processing" | "Complete"
@@ -136,6 +156,25 @@ export default function QuarterDetailPage() {
     } catch {
       return false
     }
+  }
+
+  // Helper computes exact grid and top-left offsets for a sheet
+  function buildGridAndOffset(ws: any, XLSX: any): { grid: any[][]; rowOffset: number; colOffset: number } {
+    const ref: string = ws['!ref'] || 'A1'
+    const range = XLSX.utils.decode_range(ref)
+    const rowOffset = range.s.r
+    const colOffset = range.s.c
+    const numRows = range.e.r - range.s.r + 1
+    const numCols = range.e.c - range.s.c + 1
+    const grid: any[][] = new Array(numRows).fill(null).map(() => new Array(numCols).fill(""))
+    for (let r = 0; r < numRows; r++) {
+      for (let c = 0; c < numCols; c++) {
+        const cellRef = XLSX.utils.encode_cell({ r: rowOffset + r, c: colOffset + c })
+        const cell = ws[cellRef]
+        grid[r][c] = cell ? cell.v : ""
+      }
+    }
+    return { grid, rowOffset, colOffset }
   }
 
   const handleTemplateChange = async (companyId: string, templateId: string | null) => {
@@ -589,16 +628,32 @@ const MetricTemplateSelector: FC<{
   docs: string[]
 }> = ({ selectedTemplate, onSelect, docs }) => {
   const [templates, setTemplates] = useState<string[]>([])
-  const [rows, setRows] = useState<{ metric: string; custom_instruction: string; docUrl: string }[]>([
+  const [rows, setRows] = useState<{ metric: string; custom_instruction: string; docUrl: string; sheet_name: string }[]>([
     {
       metric: "",
       custom_instruction: "",
       docUrl: docs[0] || "",
+      sheet_name: "",
     },
   ])
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null)
   const [isPendingRowsUpdate, startRowsTransition] = useTransition()
+
+  // --- Creation via Excel state ---
+  const [createStep, setCreateStep] = useState<1 | 2 | 3>(1)
+  const [uploadedExcelFile, setUploadedExcelFile] = useState<File | null>(null)
+  const [uploadedExcelBase64, setUploadedExcelBase64] = useState<string | null>(null)
+  const [workbook, setWorkbook] = useState<{ SheetNames: string[]; Sheets: Record<string, any> } | null>(null)
+  const [selectedSheet, setSelectedSheet] = useState<string | null>(null)
+  const [sheetGrid, setSheetGrid] = useState<any[][]>([])
+  const [selectedCellsBySheet, setSelectedCellsBySheet] = useState<Record<string, Set<string>>>({})
+  const [isDetecting, setIsDetecting] = useState(false)
+  const [sheetOffsets, setSheetOffsets] = useState<Record<string, { rowOffset: number; colOffset: number }>>({})
+
+  // Ensure the table becomes wider than the viewport so horizontal scroll is possible
+  const columnCount = useMemo(() => (sheetGrid && sheetGrid[0] ? sheetGrid[0].length : 0), [sheetGrid])
+  const tableMinWidthPx = useMemo(() => (columnCount > 0 ? columnCount * 140 : undefined), [columnCount])
 
   const loadTemplates = async () => {
     try {
@@ -618,10 +673,10 @@ const MetricTemplateSelector: FC<{
     return () => window.removeEventListener("templates-updated", handler)
   }, [])
 
-  const addRow = () => setRows([...rows, { metric: "", custom_instruction: "", docUrl: docs[0] || "" }])
+  const addRow = () => setRows([...rows, { metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: selectedSheet || "" }])
   const updateRow = (
     index: number,
-    field: "metric" | "custom_instruction" | "docUrl",
+    field: "metric" | "custom_instruction" | "docUrl" | "sheet_name",
     value: string,
   ) => {
     startRowsTransition(() => {
@@ -646,7 +701,7 @@ const MetricTemplateSelector: FC<{
     lines.forEach((line, i) => {
       const cols = line.split("\t")
       const target = startRow + i
-      if (target >= newRows.length) newRows.push({ metric: "", custom_instruction: "", docUrl: docs[0] || "" })
+      if (target >= newRows.length) newRows.push({ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: selectedSheet || "" })
 
       // Paste starting column then fill to the right
       if (colIndex === 0) {
@@ -686,18 +741,26 @@ const MetricTemplateSelector: FC<{
     }
 
     try {
-      const resp = await fetch("/api/metric-templates", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: trimmed,
-          metrics: rows.map((r) => ({
+      const file = uploadedExcelFile
+      if (!file && !editingTemplate) {
+        toast({ variant: "destructive", title: "Missing Excel", description: "Upload the Excel file for this template." })
+        return
+      }
+      const fd = new FormData()
+      fd.append("name", trimmed)
+      fd.append(
+        "metrics",
+        JSON.stringify(
+          rows.map((r) => ({
             metric: r.metric,
             custom_instruction: r.custom_instruction,
-            pdf_blob_url: r.docUrl || "",
+            docUrl: r.docUrl || "",
+            sheet_name: r.sheet_name || "",
           })),
-        }),
-      })
+        ),
+      )
+      if (file) fd.append("excel", file)
+      const resp = await fetch("/api/metric-templates", { method: "POST", body: fd })
 
       if (!resp.ok) {
         const message = resp.status === 409 ?
@@ -714,6 +777,134 @@ const MetricTemplateSelector: FC<{
     } catch (err) {
       console.error("Failed to save template", err)
       toast({ variant: "destructive", title: "Network Error", description: "Could not save template. Please try again." })
+    }
+  }
+
+  // --- Helpers for Excel-driven flow ---
+  const resetCreationFlow = () => {
+    setCreateStep(1)
+    setUploadedExcelFile(null)
+    setUploadedExcelBase64(null)
+    setWorkbook(null)
+    setSelectedSheet(null)
+    setSheetGrid([])
+    setSelectedCellsBySheet({})
+    setIsDetecting(false)
+    setSheetOffsets({})
+  }
+
+  const handleExcelUpload = async (file: File) => {
+    setUploadedExcelFile(file)
+    const reader = new FileReader()
+    reader.onload = async () => {
+      const dataUrl = reader.result as string
+      setUploadedExcelBase64(dataUrl)
+      try {
+        const arrayBuffer = await file.arrayBuffer()
+        const XLSX = (await import("xlsx")) as any
+        const wb = XLSX.read(arrayBuffer, { type: "array" }) as any
+        setWorkbook(wb as { SheetNames: string[]; Sheets: Record<string, any> })
+        const firstSheet = wb.SheetNames[0]
+        setSelectedSheet(firstSheet)
+        const ws = wb.Sheets[firstSheet]
+        const { grid, rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
+        setSheetGrid(grid)
+        setSheetOffsets({ [firstSheet]: { rowOffset, colOffset } })
+        setCreateStep(2)
+      } catch (e) {
+        console.error("Failed to parse Excel", e)
+        toast({ variant: "destructive", title: "Invalid Excel", description: "Please upload a valid .xlsx file." })
+      }
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const changeSheet = (name: string) => {
+    if (!workbook) return
+    ;(async () => {
+      const XLSX = (await import("xlsx")) as any
+      const ws = workbook.Sheets[name]
+      const { grid, rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
+      setSelectedSheet(name)
+      setSheetGrid(grid)
+      setSheetOffsets((prev) => ({ ...prev, [name]: { rowOffset, colOffset } }))
+      // Keep any existing selections from other sheets; do not clear here
+    })()
+  }
+
+  // A1 helpers – avoids requiring xlsx in render
+  const indexToColumn = (index: number): string => {
+    let n = index + 1
+    let col = ""
+    while (n > 0) {
+      const rem = (n - 1) % 26
+      col = String.fromCharCode(65 + rem) + col
+      n = Math.floor((n - 1) / 26)
+    }
+    return col
+  }
+  const encodeCellAddress = (r: number, c: number): string => {
+    const off = selectedSheet ? sheetOffsets[selectedSheet] : undefined
+    const rowOff = off?.rowOffset ?? 0
+    const colOff = off?.colOffset ?? 0
+    return `${indexToColumn(c + colOff)}${r + rowOff + 1}`
+  }
+
+  const toggleCell = (r: number, c: number) => {
+    if (!selectedSheet) return
+    const addr = encodeCellAddress(r, c)
+    setSelectedCellsBySheet((prev) => {
+      const current = new Map<string, Set<string>>(Object.entries(prev))
+      const set = new Set(current.get(selectedSheet) || [])
+      if (set.has(addr)) set.delete(addr)
+      else set.add(addr)
+      current.set(selectedSheet, set)
+      // Convert back to plain object with Set preserved as Set values
+      const obj: Record<string, Set<string>> = {}
+      for (const [k, v] of current.entries()) obj[k] = v
+      return obj
+    })
+  }
+
+  const detectMetrics = async () => {
+    // Build mapping { sheet_name: [A1, B2, ...] }
+    const selectedMap: Record<string, string[]> = {}
+    Object.entries(selectedCellsBySheet).forEach(([sheet, set]) => {
+      const arr = Array.from(set)
+      if (arr.length > 0) selectedMap[sheet] = arr
+    })
+
+    if (!uploadedExcelBase64 || Object.keys(selectedMap).length === 0) {
+      toast({ variant: "destructive", title: "Missing selection", description: "Upload an Excel and select at least one cell." })
+      return
+    }
+    try {
+      setIsDetecting(true)
+      const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
+      const resp = await fetch(`${apiBase}/api/detect-metrics-in-excel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // API expects: { excel_base64, addresses_by_sheet }
+        body: JSON.stringify({
+          excel_base64: (uploadedExcelBase64 || "").includes(",")
+            ? (uploadedExcelBase64 || "").split(",")[1]
+            : (uploadedExcelBase64 || ""),
+          addresses_by_sheet: selectedMap,
+        }),
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+      const bySheet: Record<string, string[]> = await resp.json()
+      // Flatten into rows while preserving sheet name
+      const autofilled = Object.entries(bySheet).flatMap(([sheet, metrics]) =>
+        (metrics || []).map((m) => ({ metric: m, custom_instruction: "", docUrl: docs[0] || "", sheet_name: sheet })),
+      )
+      setRows(autofilled.length ? autofilled : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: selectedSheet || "" }])
+      setCreateStep(3)
+    } catch (e) {
+      console.error(e)
+      toast({ variant: "destructive", title: "Detection failed", description: "Could not detect metrics from the selected cells." })
+    } finally {
+      setIsDetecting(false)
     }
   }
 
@@ -737,7 +928,13 @@ const MetricTemplateSelector: FC<{
   }
 
   return (
-    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+    <Dialog open={isDialogOpen} onOpenChange={(o) => {
+      setIsDialogOpen(o)
+      if (!o) {
+        setEditingTemplate(null)
+        resetCreationFlow()
+      }
+    }}>
       <Select
         value={selectedTemplate || "none"}
         onValueChange={(value) => {
@@ -773,13 +970,14 @@ const MetricTemplateSelector: FC<{
                   try {
                     const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
                     const data = await resp.json()
-                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string }[]
+                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string; sheet_name?: string }[]
                     const normalized = metricsRaw.map((m) => ({
                       metric: m.metric,
                       custom_instruction: m.custom_instruction,
                       docUrl: m.docUrl || m.pdf_blob_url || docs[0] || "",
+                      sheet_name: (m as any).sheet_name || "",
                     }))
-                    setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "" }])
+                    setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: "" }])
                     setEditingTemplate(name)
                     setIsDialogOpen(true)
                   } catch (err) {
@@ -822,111 +1020,310 @@ const MetricTemplateSelector: FC<{
       </Select>
 
       {/* Modal */}
-      <DialogContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw]">
+      <DialogContent className="w-full sm:max-w-[90vw] lg:max-w-[80vw] xl:max-w-[70vw] max-h-[85vh] overflow-y-auto flex flex-col">
         <DialogHeader>
           <DialogTitle>{editingTemplate ? `Edit Template – ${editingTemplate}` : "Create Metric Template"}</DialogTitle>
         </DialogHeader>
-        <div className="space-y-4">
-          <Input
-            placeholder="Template Name"
-            id="templateNameInput"
-            defaultValue={editingTemplate || ""}
-          />
 
-          <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
-            <Table>
-              <TableHeader className="sticky top-0 bg-white z-10">
-                <TableRow>
-                  <TableHead>Metric Name</TableHead>
-                  <TableHead>Extraction Instruction</TableHead>
-                  <TableHead>Document</TableHead>
-                  <TableHead>
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((row, index) => (
-                  <TableRow key={index}>
-                    {/* Metric Name cell */}
-                    <TableCell
-                      contentEditable
-                      suppressContentEditableWarning
-                      className="outline-none w-full min-w-[180px] px-2 py-1 align-top border-r border-gray-200"
-                      style={{ width: "30%" }}
-                      onBlur={(e) => {
-                        const text = (e.target as HTMLElement).innerText
-                        // Defer state update so the next cell can receive focus before re-render
-                        setTimeout(() => updateRow(index, "metric", text), 0)
-                      }}
-                      onPaste={(e) => handlePaste(e as any, index, 0)}
-                    >
-                      {row.metric}
-                    </TableCell>
+        {editingTemplate ? (
+          // --- Existing edit flow ---
+          <>
+            <div className="space-y-4">
+              <Input
+                placeholder="Template Name"
+                id="templateNameInput"
+                defaultValue={editingTemplate || ""}
+              />
 
-                    {/* Extraction Instruction cell */}
-                    <TableCell
-                      contentEditable
-                      suppressContentEditableWarning
-                      className="outline-none w-full px-2 py-1 align-top"
-                      onBlur={(e) => {
-                        const text = (e.target as HTMLElement).innerText
-                        setTimeout(() => updateRow(index, "custom_instruction", text), 0)
-                      }}
-                      onPaste={(e) => handlePaste(e as any, index, 1)}
-                    >
-                      {row.custom_instruction}
-                    </TableCell>
-
-                    {/* Document selection */}
-                    <TableCell className="align-top w-40">
-                      <Select
-                        value={row.docUrl}
-                        onValueChange={(val) => updateRow(index, "docUrl", val)}
-                      >
-                        <SelectTrigger className="w-full h-8">
-                          <SelectValue placeholder="Select" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {docs.map((d) => {
-                            const raw = d.split("/").pop() || ""
-                            const decoded = decodeURIComponent(raw)
-                            const name = decoded.split("/").pop() || "Doc"
-                            return (
-                              <SelectItem key={d} value={d} className="truncate">
-                                {name}
-                              </SelectItem>
-                            )
-                          })}
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-
-                    <TableCell className="w-8 align-top">
-                      <Button variant="ghost" size="icon" onClick={() => setRows(rows.filter((_, i) => i !== index))}>
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+                      <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
+                <Table>
+                  <TableHeader className="sticky top-0 bg-white z-10">
+                    <TableRow>
+                   <TableHead>Metric Name</TableHead>
+                   <TableHead>Extraction Instruction</TableHead>
+                   <TableHead>Sheet</TableHead>
+                   <TableHead>Document</TableHead>
+                       <TableHead>
+                        <span className="sr-only">Actions</span>
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((row, index) => (
+                      <TableRow key={index}>
+                      <TableCell
+                          contentEditable
+                          suppressContentEditableWarning
+                          className="outline-none w-full min-w-[180px] px-2 py-1 align-top border-r border-gray-200"
+                          style={{ width: "30%" }}
+                          onBlur={(e) => {
+                            const text = (e.target as HTMLElement).innerText
+                            setTimeout(() => updateRow(index, "metric", text), 0)
+                          }}
+                          onPaste={(e) => handlePaste(e as any, index, 0)}
+                        >
+                          {row.metric}
+                        </TableCell>
+                        <TableCell
+                          contentEditable
+                          suppressContentEditableWarning
+                          className="outline-none w-full px-2 py-1 align-top"
+                          onBlur={(e) => {
+                            const text = (e.target as HTMLElement).innerText
+                            setTimeout(() => updateRow(index, "custom_instruction", text), 0)
+                          }}
+                          onPaste={(e) => handlePaste(e as any, index, 1)}
+                        >
+                          {row.custom_instruction}
+                        </TableCell>
+                      <TableCell className="align-top w-32 text-xs text-gray-700">{row.sheet_name}</TableCell>
+                      <TableCell className="align-top w-40">
+                        <Select value={row.docUrl} onValueChange={(val) => updateRow(index, "docUrl", val)}>
+                          <SelectTrigger className="w-full h-8">
+                            <SelectValue placeholder="Select" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {docs.map((d) => {
+                              const raw = d.split("/").pop() || ""
+                              const decoded = decodeURIComponent(raw)
+                              const name = decoded.split("/").pop() || "Doc"
+                              return (
+                                <SelectItem key={d} value={d} className="truncate">
+                                  {name}
+                                </SelectItem>
+                              )
+                            })}
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                        
+                        <TableCell className="w-8 align-top">
+                          <Button variant="ghost" size="icon" onClick={() => setRows(rows.filter((_, i) => i !== index))}>
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <Button variant="outline" onClick={addRow}>
+                <Plus className="h-4 w-4 mr-2" /> Add Row
+              </Button>
+            </div>
+            <DialogFooter className="sticky bottom-0 bg-white border-t py-4">
+              <Button
+                onClick={() => {
+                  const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
+                  saveTemplate(nameInput?.value ?? "")
+                  setEditingTemplate(null)
+                }}
+              >
+                Save Template
+              </Button>
+            </DialogFooter>
+          </>
+        ) : (
+          // --- New multi-step creation flow ---
+          <div className="flex gap-6">
+            {/* Vertical stepper */}
+            <div className="w-48">
+              <div className="relative">
+                <div className="absolute left-3 top-0 bottom-0 w-0.5 bg-gray-200" />
+                {[
+                  { id: 1, label: "Upload Excel" },
+                  { id: 2, label: "Select Cells" },
+                  { id: 3, label: "Review & Save" },
+                ].map((s) => (
+                  <div key={s.id} className="relative pl-8 py-3">
+                    <div className={`absolute left-0 top-1.5 h-6 w-6 rounded-full border-2 flex items-center justify-center ${createStep >= (s.id as 1 | 2 | 3) ? "border-primary" : "border-gray-300"}`}>
+                      <div className={`h-3 w-3 rounded-full ${createStep > (s.id as 1 | 2 | 3) ? "bg-primary" : createStep === (s.id as 1 | 2 | 3) ? "bg-primary/60" : "bg-gray-200"}`} />
+                    </div>
+                    <div className={`text-sm ${createStep >= (s.id as 1 | 2 | 3) ? "text-gray-900" : "text-gray-500"}`}>{s.label}</div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
+              </div>
+            </div>
+
+            {/* Step content */}
+            <div className="flex-1 space-y-4">
+              {createStep === 1 && (
+                <div className="space-y-3">
+                  <p className="text-sm text-gray-600">Upload an Excel file (.xlsx). We will render it so you can pick the cells containing metric names.</p>
+                  <input
+                    type="file"
+                    accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0]
+                      if (f) handleExcelUpload(f)
+                    }}
+                  />
+                </div>
+              )}
+
+              {createStep === 2 && (
+                <div className="flex flex-col gap-3 h-[60vh]">
+                  {/* Grid viewer */}
+                  <div className="flex-1 border rounded overflow-x-auto overflow-y-auto bg-white touch-pan-x scroll-x">
+                    <table
+                      className="table-auto text-xs"
+                      style={{ WebkitOverflowScrolling: "touch", minWidth: tableMinWidthPx ? `${tableMinWidthPx}px` : undefined }}
+                    >
+                      <tbody>
+                        {sheetGrid.map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {row.map((val, cIdx) => {
+                               const addr = encodeCellAddress(rIdx, cIdx)
+                              const currentSet = selectedSheet ? selectedCellsBySheet[selectedSheet] : undefined
+                              const isSel = Boolean(currentSet && currentSet.has(addr))
+                              return (
+                                <td
+                                  key={cIdx}
+                                  onClick={() => toggleCell(rIdx, cIdx)}
+                                  className={`border px-2 py-1 cursor-pointer align-top text-[11px] whitespace-nowrap ${isSel ? "bg-primary/10 border-primary" : "bg-white"}`}
+                                  title={addr}
+                                >
+                                  {val != null ? String(val) : ""}
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Bottom sheet tabs like Excel */}
+                  <div className="flex items-center gap-1 overflow-x-auto border rounded bg-white p-1">
+                    {((workbook?.SheetNames ?? []) as string[]).map((name) => {
+                      const isActive = name === selectedSheet
+                      return (
+                        <button
+                          key={name}
+                          onClick={() => changeSheet(name)}
+                          className={`px-3 py-1 text-xs rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                            isActive ? "bg-primary/10 border-primary text-primary" : "bg-white hover:bg-gray-50"
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* Action bar */}
+                  <div className="shrink-0 flex items-center border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" onClick={() => setCreateStep(1)}>Back</Button>
+                      <Button
+                        onClick={detectMetrics}
+                        disabled={
+                          isDetecting ||
+                          Object.values(selectedCellsBySheet).reduce((acc, set) => acc + set.size, 0) === 0
+                        }
+                      >
+                        {isDetecting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        {isDetecting ? "Detecting…" : "Next"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {createStep === 3 && (
+                <>
+                  <Input placeholder="Template Name" id="templateNameInput" />
+                  <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
+                    <Table>
+                      <TableHeader className="sticky top-0 bg-white z-10">
+                        <TableRow>
+                          <TableHead>Metric Name</TableHead>
+                          <TableHead>Extraction Instruction</TableHead>
+                          <TableHead>Sheet</TableHead>
+                          <TableHead>Document</TableHead>
+                          <TableHead>
+                            <span className="sr-only">Actions</span>
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {rows.map((row, index) => (
+                          <TableRow key={index}>
+                            <TableCell
+                              contentEditable
+                              suppressContentEditableWarning
+                              className="outline-none w-full min-w-[180px] px-2 py-1 align-top border-r border-gray-200"
+                              style={{ width: "30%" }}
+                              onBlur={(e) => {
+                                const text = (e.target as HTMLElement).innerText
+                                setTimeout(() => updateRow(index, "metric", text), 0)
+                              }}
+                              onPaste={(e) => handlePaste(e as any, index, 0)}
+                            >
+                              {row.metric}
+                            </TableCell>
+                            <TableCell
+                              contentEditable
+                              suppressContentEditableWarning
+                              className="outline-none w-full px-2 py-1 align-top"
+                              onBlur={(e) => {
+                                const text = (e.target as HTMLElement).innerText
+                                setTimeout(() => updateRow(index, "custom_instruction", text), 0)
+                              }}
+                              onPaste={(e) => handlePaste(e as any, index, 1)}
+                            >
+                              {row.custom_instruction}
+                            </TableCell>
+                            <TableCell className="align-top w-32 text-xs text-gray-700">{row.sheet_name}</TableCell>
+                            <TableCell className="align-top w-40">
+                              <Select value={row.docUrl} onValueChange={(val) => updateRow(index, "docUrl", val)}>
+                                <SelectTrigger className="w-full h-8">
+                                  <SelectValue placeholder="Select" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {docs.map((d) => {
+                                    const raw = d.split("/").pop() || ""
+                                    const decoded = decodeURIComponent(raw)
+                                    const name = decoded.split("/").pop() || "Doc"
+                                    return (
+                                      <SelectItem key={d} value={d} className="truncate">
+                                        {name}
+                                      </SelectItem>
+                                    )
+                                  })}
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
+                            
+                            <TableCell className="w-8 align-top">
+                              <Button variant="ghost" size="icon" onClick={() => setRows(rows.filter((_, i) => i !== index))}>
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <Button variant="outline" onClick={addRow} className="mb-4">
+                    <Plus className="h-4 w-4 mr-2" /> Add Row
+                  </Button>
+                  <div className="flex justify-between items-center">
+                    <Button variant="outline" onClick={() => setCreateStep(2)}>Back</Button>
+                    <Button
+                      onClick={() => {
+                        const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
+                        saveTemplate(nameInput?.value ?? "")
+                      }}
+                    >
+                      Save Template
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-          <Button variant="outline" onClick={addRow}>
-            <Plus className="h-4 w-4 mr-2" /> Add Row
-          </Button>
-        </div>
-        <DialogFooter>
-          <Button
-            onClick={() => {
-              const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
-              saveTemplate(nameInput?.value ?? "")
-              setEditingTemplate(null)
-            }}
-          >
-            Save Template
-          </Button>
-        </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   )
@@ -1319,12 +1716,25 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
       const encodedQuarter = encodeURIComponent(quarterTitle)
       const encodedCompany = encodeURIComponent(company.name)
       const jsonUrl = `https://byndpdfstorage.blob.core.windows.net/metric-workflow/${encodedQuarter}/${encodedCompany}/${company.template}/results.json`
+      // Fetch excel_url for the currently selected template
+      let excelUrl: string | null = null
+      if (company.template) {
+        try {
+          const tmplResp = await fetch(`/api/metric-templates/${encodeURIComponent(company.template)}`)
+          if (tmplResp.ok) {
+            const tmpl = await tmplResp.json()
+            excelUrl = tmpl?.excel_url || null
+          }
+        } catch (e) {
+          console.error("Failed to fetch template excel_url", e)
+        }
+      }
 
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
       const resp = await fetch(`${apiBase}/api/metrics-to-excel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ json_url: jsonUrl }),
+        body: JSON.stringify({ json_url: jsonUrl, excel_url: excelUrl }),
       })
 
       if (!resp.ok) {
@@ -1374,70 +1784,70 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
             </Button>
           </div>
           {results ? (
-            <div>
-              {/* Build an ordered map of blob -> metrics preserving original metric order */}
-              {(() => {
-                const groupMap = new Map<string, string[]>()
-                Object.keys(results).forEach((metricName) => {
-                  const blobPath: string = results[metricName]?.citation_blob_path || results[metricName]?.pdf_blob_path || "__unknown__"
-                  if (!groupMap.has(blobPath)) groupMap.set(blobPath, [])
-                  groupMap.get(blobPath)!.push(metricName)
-                })
+              <div>
+                {/* Build an ordered map of blob -> metrics preserving original metric order */}
+                {(() => {
+                  const groupMap = new Map<string, string[]>()
+                  Object.keys(results).forEach((metricName) => {
+                    const blobPath: string = results[metricName]?.citation_blob_path || results[metricName]?.pdf_blob_path || "__unknown__"
+                    if (!groupMap.has(blobPath)) groupMap.set(blobPath, [])
+                    groupMap.get(blobPath)!.push(metricName)
+                  })
 
-                // Render each group with a heading followed by its metrics
-                return Array.from(groupMap.entries()).map(([blobPath, metricNames]) => {
-                  // Derive a readable PDF filename from the blob URL
-                  const fileName = (() => {
-                    if (blobPath === "__unknown__") return "Unknown Document"
-                    try {
-                      const decoded = decodeURIComponent(blobPath)
-                      return decoded.split("/").pop() || decoded
-                    } catch {
-                      // Fallback if decoding fails
-                      return blobPath.split("/").pop() || blobPath
-                    }
-                  })()
+                  // Render each group with a heading followed by its metrics
+                  return Array.from(groupMap.entries()).map(([blobPath, metricNames]) => {
+                    // Derive a readable PDF filename from the blob URL
+                    const fileName = (() => {
+                      if (blobPath === "__unknown__") return "Unknown Document"
+                      try {
+                        const decoded = decodeURIComponent(blobPath)
+                        return decoded.split("/").pop() || decoded
+                      } catch {
+                        // Fallback if decoding fails
+                        return blobPath.split("/").pop() || blobPath
+                      }
+                    })()
 
-                  return (
-                    <div key={blobPath}>
-                      {/* Group heading */}
-                      <div className="px-4 py-2 bg-gray-50 border-t font-semibold text-xs text-gray-700 sticky top-0">
-                        {fileName}
+                    return (
+                      <div key={blobPath}>
+                        {/* Group heading */}
+                        <div className="px-4 py-2 bg-gray-50 border-t font-semibold text-xs text-gray-700 sticky top-0">
+                          {fileName}
+                        </div>
+                        <ul>
+                          {metricNames.map((m) => {
+                            const r = results[m] || {}
+                            const infoParts = [r.unit, r.extracted_value, r.denomination].filter(Boolean)
+                            const infoLine = infoParts.join(" ")
+                            return (
+                              <li key={m}>
+                                <button
+                                  className={`relative w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
+                                  onClick={() => {
+                                    setSelectedMetric(m)
+                                    setScrollSignal((s) => s + 1)
+                                  }}
+                                >
+                                  <div className="font-medium">{m}</div>
+                                  {infoLine && <div className="text-xs text-gray-600 mt-0.5">{infoLine}</div>}
+                                  {!verifiedMap[m] ? (
+                                    <span className="absolute right-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-amber-400" />
+                                  ) : (
+                                    <CheckCircle2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-green-600" />
+                                  )}
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
                       </div>
-                      <ul>
-                        {metricNames.map((m) => {
-                          const r = results[m] || {}
-                          const infoParts = [r.unit, r.extracted_value, r.denomination].filter(Boolean)
-                          const infoLine = infoParts.join(" ")
-                          return (
-                            <li key={m}>
-                              <button
-                                className={`relative w-full text-left px-4 py-2 hover:bg-gray-100 ${selectedMetric === m ? "bg-primary/10" : ""}`}
-                                onClick={() => {
-                                  setSelectedMetric(m)
-                                  setScrollSignal((s) => s + 1)
-                                }}
-                              >
-                                <div className="font-medium">{m}</div>
-                                {infoLine && <div className="text-xs text-gray-600 mt-0.5">{infoLine}</div>}
-                                {!verifiedMap[m] ? (
-                                  <span className="absolute right-3 top-1/2 -translate-y-1/2 h-2 w-2 rounded-full bg-amber-400" />
-                                ) : (
-                                  <CheckCircle2 className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-green-600" />
-                                )}
-                              </button>
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    </div>
-                  )
-                })
-              })()}
-            </div>
-          ) : (
-            <div className="p-4 text-sm text-gray-500">Loading...</div>
-          )}
+                    )
+                  })
+                })()}
+              </div>
+            ) : (
+              <div className="p-4 text-sm text-gray-500">Loading...</div>
+            )}
         </div>
 
         {/* Right PDF viewer */}
