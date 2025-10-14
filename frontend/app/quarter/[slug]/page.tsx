@@ -881,16 +881,27 @@ const MetricTemplateSelector: FC<{
     try {
       setIsDetecting(true)
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
+      
+      const excel_base64 = (uploadedExcelBase64 || "").includes(",")
+        ? (uploadedExcelBase64 || "").split(",")[1]
+        : (uploadedExcelBase64 || "")
+      
+      const payload = {
+        excel_base64,
+        addresses_by_sheet: selectedMap,
+      }
+      
+      // Log payload with truncated base64
+      console.log("🔍 Detect Metrics Excel API Payload:", {
+        excel_base64: excel_base64.substring(0, 100) + `... (${excel_base64.length} chars total)`,
+        addresses_by_sheet: selectedMap,
+      })
+      
       const resp = await fetch(`${apiBase}/api/detect-metrics-in-excel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         // API expects: { excel_base64, addresses_by_sheet }
-        body: JSON.stringify({
-          excel_base64: (uploadedExcelBase64 || "").includes(",")
-            ? (uploadedExcelBase64 || "").split(",")[1]
-            : (uploadedExcelBase64 || ""),
-          addresses_by_sheet: selectedMap,
-        }),
+        body: JSON.stringify(payload),
       })
       if (!resp.ok) throw new Error(await resp.text())
       const bySheet: Record<string, string[]> = await resp.json()
@@ -1817,7 +1828,8 @@ const ResultsSheet: FC<ResultsSheetProps> = ({ isOpen, onOpenChange, company, qu
                         <ul>
                           {metricNames.map((m) => {
                             const r = results[m] || {}
-                            const infoParts = [r.unit, r.extracted_value, r.denomination].filter(Boolean)
+                            const hasCitations = r.citation_coords && Array.isArray(r.citation_coords) && r.citation_coords.length > 0
+                            const infoParts = hasCitations ? [r.unit, r.extracted_value, r.denomination].filter(Boolean) : []
                             const infoLine = infoParts.join(" ")
                             return (
                               <li key={m}>
