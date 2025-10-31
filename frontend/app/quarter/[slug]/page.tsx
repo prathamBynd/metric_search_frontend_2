@@ -650,10 +650,19 @@ const MetricTemplateSelector: FC<{
   const [selectedCellsBySheet, setSelectedCellsBySheet] = useState<Record<string, Set<string>>>({})
   const [isDetecting, setIsDetecting] = useState(false)
   const [sheetOffsets, setSheetOffsets] = useState<Record<string, { rowOffset: number; colOffset: number }>>({})
+  const [availableSheets, setAvailableSheets] = useState<string[]>([])
 
   // Ensure the table becomes wider than the viewport so horizontal scroll is possible
   const columnCount = useMemo(() => (sheetGrid && sheetGrid[0] ? sheetGrid[0].length : 0), [sheetGrid])
   const tableMinWidthPx = useMemo(() => (columnCount > 0 ? columnCount * 140 : undefined), [columnCount])
+  const NONE_SHEET_VALUE = "__none__"
+
+  const sheetOptions = useMemo(() => {
+    const rowSheets = rows
+      .map((r) => r.sheet_name)
+      .filter((name): name is string => Boolean(name))
+    return Array.from(new Set([...(availableSheets || []), ...rowSheets]))
+  }, [availableSheets, rows])
 
   const loadTemplates = async () => {
     try {
@@ -791,6 +800,7 @@ const MetricTemplateSelector: FC<{
     setSelectedCellsBySheet({})
     setIsDetecting(false)
     setSheetOffsets({})
+    setAvailableSheets([])
   }
 
   const handleExcelUpload = async (file: File) => {
@@ -804,12 +814,19 @@ const MetricTemplateSelector: FC<{
         const XLSX = (await import("xlsx")) as any
         const wb = XLSX.read(arrayBuffer, { type: "array" }) as any
         setWorkbook(wb as { SheetNames: string[]; Sheets: Record<string, any> })
-        const firstSheet = wb.SheetNames[0]
-        setSelectedSheet(firstSheet)
-        const ws = wb.Sheets[firstSheet]
-        const { grid, rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
-        setSheetGrid(grid)
-        setSheetOffsets({ [firstSheet]: { rowOffset, colOffset } })
+        const sheetNames = Array.isArray(wb?.SheetNames) ? wb.SheetNames : []
+        setAvailableSheets(sheetNames)
+        const firstSheet = sheetNames[0]
+        setSelectedSheet(firstSheet ?? null)
+        if (firstSheet) {
+          const ws = wb.Sheets[firstSheet]
+          const { grid, rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
+          setSheetGrid(grid)
+          setSheetOffsets({ [firstSheet]: { rowOffset, colOffset } })
+        } else {
+          setSheetGrid([])
+          setSheetOffsets({})
+        }
         setCreateStep(2)
       } catch (e) {
         console.error("Failed to parse Excel", e)
@@ -817,6 +834,40 @@ const MetricTemplateSelector: FC<{
       }
     }
     reader.readAsDataURL(file)
+  }
+
+  const loadSheetNamesFromExcelUrl = async (excelUrl: string, preferredSheet?: string | null) => {
+    if (!excelUrl) {
+      setAvailableSheets([])
+      setSelectedSheet(preferredSheet ?? null)
+      return
+    }
+    try {
+      const resp = await fetch(excelUrl)
+      if (!resp.ok) {
+        throw new Error(`Failed to fetch Excel (${resp.status})`)
+      }
+      const arrayBuffer = await resp.arrayBuffer()
+      const XLSX = (await import("xlsx")) as any
+      const wb = XLSX.read(arrayBuffer, { type: "array" }) as any
+      const names = Array.isArray(wb?.SheetNames) ? wb.SheetNames : []
+      setAvailableSheets(names)
+      setSelectedSheet(() => {
+        if (preferredSheet && names.includes(preferredSheet)) {
+          return preferredSheet
+        }
+        return names[0] ?? null
+      })
+    } catch (error) {
+      console.error("Failed to load sheet names from Excel", error)
+      toast({
+        variant: "destructive",
+        title: "Excel Load Failed",
+        description: "Could not read sheet names from the template Excel.",
+      })
+      setAvailableSheets([])
+      setSelectedSheet(preferredSheet ?? null)
+    }
   }
 
   const changeSheet = (name: string) => {
@@ -979,7 +1030,11 @@ const MetricTemplateSelector: FC<{
                 onClick={async (e) => {
                   e.stopPropagation()
                   try {
+                    setAvailableSheets([])
                     const resp = await fetch(`/api/metric-templates/${encodeURIComponent(name)}`)
+                    if (!resp.ok) {
+                      throw new Error(`Template fetch failed (${resp.status})`)
+                    }
                     const data = await resp.json()
                     const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string; sheet_name?: string }[]
                     const normalized = metricsRaw.map((m) => ({
@@ -988,11 +1043,15 @@ const MetricTemplateSelector: FC<{
                       docUrl: m.docUrl || m.pdf_blob_url || docs[0] || "",
                       sheet_name: (m as any).sheet_name || "",
                     }))
+                    const preferredSheet = normalized.find((row) => row.sheet_name)?.sheet_name || null
                     setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: "" }])
+                    setSelectedSheet(preferredSheet)
                     setEditingTemplate(name)
                     setIsDialogOpen(true)
+                    void loadSheetNamesFromExcelUrl(typeof data.excel_url === "string" ? data.excel_url : "", preferredSheet)
                   } catch (err) {
                     console.error("Failed to load template for editing", err)
+                    toast({ variant: "destructive", title: "Load Failed", description: "Could not open template for editing." })
                   }
                 }}
               >
@@ -1087,7 +1146,25 @@ const MetricTemplateSelector: FC<{
                         >
                           {row.custom_instruction}
                         </TableCell>
-                      <TableCell className="align-top w-32 text-xs text-gray-700">{row.sheet_name}</TableCell>
+                      <TableCell className="align-top w-40">
+                        <Select
+                          value={row.sheet_name || NONE_SHEET_VALUE}
+                          onValueChange={(val) => updateRow(index, "sheet_name", val === NONE_SHEET_VALUE ? "" : val)}
+                          disabled={sheetOptions.length === 0}
+                        >
+                          <SelectTrigger className="w-full h-8 text-xs">
+                            <SelectValue placeholder={sheetOptions.length ? "Select sheet" : "No sheets"} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {sheetOptions.map((sheet) => (
+                              <SelectItem key={sheet} value={sheet} className="truncate">
+                                {sheet}
+                              </SelectItem>
+                            ))}
+                            <SelectItem value={NONE_SHEET_VALUE}>None</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
                       <TableCell className="align-top w-40">
                         <Select value={row.docUrl} onValueChange={(val) => updateRow(index, "docUrl", val)}>
                           <SelectTrigger className="w-full h-8">
@@ -1285,7 +1362,25 @@ const MetricTemplateSelector: FC<{
                             >
                               {row.custom_instruction}
                             </TableCell>
-                            <TableCell className="align-top w-32 text-xs text-gray-700">{row.sheet_name}</TableCell>
+                            <TableCell className="align-top w-40">
+                              <Select
+                                value={row.sheet_name || NONE_SHEET_VALUE}
+                                onValueChange={(val) => updateRow(index, "sheet_name", val === NONE_SHEET_VALUE ? "" : val)}
+                                disabled={sheetOptions.length === 0}
+                              >
+                                <SelectTrigger className="w-full h-8 text-xs">
+                                  <SelectValue placeholder={sheetOptions.length ? "Select sheet" : "No sheets"} />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {sheetOptions.map((sheet) => (
+                                    <SelectItem key={sheet} value={sheet} className="truncate">
+                                      {sheet}
+                                    </SelectItem>
+                                  ))}
+                                  <SelectItem value={NONE_SHEET_VALUE}>None</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
                             <TableCell className="align-top w-40">
                               <Select value={row.docUrl} onValueChange={(val) => updateRow(index, "docUrl", val)}>
                                 <SelectTrigger className="w-full h-8">
