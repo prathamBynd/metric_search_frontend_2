@@ -628,7 +628,7 @@ const MetricTemplateSelector: FC<{
   docs: string[]
 }> = ({ selectedTemplate, onSelect, docs }) => {
   const [templates, setTemplates] = useState<string[]>([])
-  const [rows, setRows] = useState<{ metric: string; custom_instruction: string; docUrl: string; sheet_name: string }[]>([
+  const [rows, setRows] = useState<{ metric: string; custom_instruction: string; docUrl: string; sheet_name: string; target_row?: number }[]>([
     {
       metric: "",
       custom_instruction: "",
@@ -651,6 +651,7 @@ const MetricTemplateSelector: FC<{
   const [isDetecting, setIsDetecting] = useState(false)
   const [sheetOffsets, setSheetOffsets] = useState<Record<string, { rowOffset: number; colOffset: number }>>({})
   const [availableSheets, setAvailableSheets] = useState<string[]>([])
+  const [previouslySelectedCells, setPreviouslySelectedCells] = useState<Record<string, Set<string>>>({})
 
   // Ensure the table becomes wider than the viewport so horizontal scroll is possible
   const columnCount = useMemo(() => (sheetGrid && sheetGrid[0] ? sheetGrid[0].length : 0), [sheetGrid])
@@ -765,6 +766,7 @@ const MetricTemplateSelector: FC<{
             custom_instruction: r.custom_instruction,
             docUrl: r.docUrl || "",
             sheet_name: r.sheet_name || "",
+            target_row: r.target_row,
           })),
         ),
       )
@@ -801,6 +803,7 @@ const MetricTemplateSelector: FC<{
     setIsDetecting(false)
     setSheetOffsets({})
     setAvailableSheets([])
+    setPreviouslySelectedCells({})
   }
 
   const handleExcelUpload = async (file: File) => {
@@ -870,6 +873,75 @@ const MetricTemplateSelector: FC<{
     }
   }
 
+  const loadExcelForEditing = async (excelUrl: string, metricsWithTargetRows: { sheet_name: string; target_row?: number }[]) => {
+    if (!excelUrl) return
+    try {
+      const resp = await fetch(excelUrl)
+      if (!resp.ok) {
+        throw new Error(`Failed to fetch Excel (${resp.status})`)
+      }
+      const arrayBuffer = await resp.arrayBuffer()
+      const XLSX = (await import("xlsx")) as any
+      const wb = XLSX.read(arrayBuffer, { type: "array" }) as any
+
+      setWorkbook(wb)
+      const sheetNames = Array.isArray(wb?.SheetNames) ? wb.SheetNames : []
+      setAvailableSheets(sheetNames)
+
+      // Build previously selected cells from metrics with target_row
+      const previousCells: Record<string, Set<string>> = {}
+      const allOffsets: Record<string, { rowOffset: number; colOffset: number }> = {}
+
+      metricsWithTargetRows.forEach((metric) => {
+        if (metric.sheet_name && metric.target_row !== undefined && wb.Sheets[metric.sheet_name]) {
+          const ws = wb.Sheets[metric.sheet_name]
+          const { rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
+          allOffsets[metric.sheet_name] = { rowOffset, colOffset }
+
+          // Convert target_row (Excel row number) to cell address
+          // We need to find which column contains the metric name
+          // For now, we'll assume it's in the first column (A)
+          const cellAddress = `A${metric.target_row}`
+
+          if (!previousCells[metric.sheet_name]) {
+            previousCells[metric.sheet_name] = new Set()
+          }
+          previousCells[metric.sheet_name].add(cellAddress)
+        }
+      })
+
+      setPreviouslySelectedCells(previousCells)
+      setSelectedCellsBySheet(structuredClone(previousCells))
+      setSheetOffsets(allOffsets)
+
+      // Load the first sheet or preferred sheet
+      const firstSheet = sheetNames[0]
+      if (firstSheet && wb.Sheets[firstSheet]) {
+        const ws = wb.Sheets[firstSheet]
+        const { grid, rowOffset, colOffset } = buildGridAndOffset(ws, XLSX)
+        setSheetGrid(grid)
+        setSheetOffsets((prev) => ({ ...prev, [firstSheet]: { rowOffset, colOffset } }))
+        setSelectedSheet(firstSheet)
+      }
+
+      // Convert to base64 for potential re-detection
+      const blob = new Blob([arrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+      const reader = new FileReader()
+      reader.onload = () => {
+        setUploadedExcelBase64(reader.result as string)
+      }
+      reader.readAsDataURL(blob)
+
+    } catch (error) {
+      console.error("Failed to load Excel for editing", error)
+      toast({
+        variant: "destructive",
+        title: "Excel Load Failed",
+        description: "Could not load the Excel file for editing.",
+      })
+    }
+  }
+
   const changeSheet = (name: string) => {
     if (!workbook) return
     ;(async () => {
@@ -918,36 +990,51 @@ const MetricTemplateSelector: FC<{
   }
 
   const detectMetrics = async () => {
-    // Build mapping { sheet_name: [A1, B2, ...] }
-    const selectedMap: Record<string, string[]> = {}
+    // Build mapping of ALL selected cells { sheet_name: [A1, B2, ...] }
+    const allSelectedMap: Record<string, string[]> = {}
     Object.entries(selectedCellsBySheet).forEach(([sheet, set]) => {
       const arr = Array.from(set)
-      if (arr.length > 0) selectedMap[sheet] = arr
+      if (arr.length > 0) allSelectedMap[sheet] = arr
     })
 
-    if (!uploadedExcelBase64 || Object.keys(selectedMap).length === 0) {
+    // Build mapping of ONLY NEW cells (not in previouslySelectedCells)
+    const newCellsMap: Record<string, string[]> = {}
+    Object.entries(selectedCellsBySheet).forEach(([sheet, set]) => {
+      const previousSet = previouslySelectedCells[sheet] || new Set<string>()
+      const newCells = Array.from(set).filter(cell => !previousSet.has(cell))
+      if (newCells.length > 0) newCellsMap[sheet] = newCells
+    })
+
+    if (!uploadedExcelBase64 || Object.keys(allSelectedMap).length === 0) {
       toast({ variant: "destructive", title: "Missing selection", description: "Upload an Excel and select at least one cell." })
       return
     }
+
+    // If there are no new cells, just proceed to step 3 without calling the API
+    if (Object.keys(newCellsMap).length === 0) {
+      setCreateStep(3)
+      return
+    }
+
     try {
       setIsDetecting(true)
       const apiBase = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || ""
-      
+
       const excel_base64 = (uploadedExcelBase64 || "").includes(",")
         ? (uploadedExcelBase64 || "").split(",")[1]
         : (uploadedExcelBase64 || "")
-      
+
       const payload = {
         excel_base64,
-        addresses_by_sheet: selectedMap,
+        addresses_by_sheet: newCellsMap,
       }
-      
+
       // Log payload with truncated base64
-      console.log("🔍 Detect Metrics Excel API Payload:", {
+      console.log("🔍 Detect Metrics Excel API Payload (NEW cells only):", {
         excel_base64: excel_base64.substring(0, 100) + `... (${excel_base64.length} chars total)`,
-        addresses_by_sheet: selectedMap,
+        addresses_by_sheet: newCellsMap,
       })
-      
+
       const resp = await fetch(`${apiBase}/api/detect-metrics-in-excel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -955,12 +1042,23 @@ const MetricTemplateSelector: FC<{
         body: JSON.stringify(payload),
       })
       if (!resp.ok) throw new Error(await resp.text())
-      const bySheet: Record<string, string[]> = await resp.json()
-      // Flatten into rows while preserving sheet name
-      const autofilled = Object.entries(bySheet).flatMap(([sheet, metrics]) =>
-        (metrics || []).map((m) => ({ metric: m, custom_instruction: "", docUrl: docs[0] || "", sheet_name: sheet })),
-      )
-      setRows(autofilled.length ? autofilled : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: selectedSheet || "" }])
+      const detectedMetrics: { metric: string; target_row: number; sheet_name: string }[] = await resp.json()
+
+      // Map newly detected metrics into rows
+      const newRows = detectedMetrics.map((m) => ({
+        metric: m.metric,
+        custom_instruction: "",
+        docUrl: docs[0] || "",
+        sheet_name: m.sheet_name,
+        target_row: m.target_row
+      }))
+
+      // Merge with existing rows
+      setRows(prev => [...prev, ...newRows])
+
+      // Update previously selected cells to include all current selections
+      setPreviouslySelectedCells(structuredClone(selectedCellsBySheet))
+
       setCreateStep(3)
     } catch (e) {
       console.error(e)
@@ -1036,19 +1134,23 @@ const MetricTemplateSelector: FC<{
                       throw new Error(`Template fetch failed (${resp.status})`)
                     }
                     const data = await resp.json()
-                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string; sheet_name?: string }[]
+                    const metricsRaw = (data.metrics || []) as { metric: string; custom_instruction: string; pdf_blob_url?: string; docUrl?: string; sheet_name?: string; target_row?: number }[]
                     const normalized = metricsRaw.map((m) => ({
                       metric: m.metric,
                       custom_instruction: m.custom_instruction,
                       docUrl: m.docUrl || m.pdf_blob_url || docs[0] || "",
                       sheet_name: (m as any).sheet_name || "",
+                      target_row: m.target_row,
                     }))
-                    const preferredSheet = normalized.find((row) => row.sheet_name)?.sheet_name || null
                     setRows(normalized.length ? normalized : [{ metric: "", custom_instruction: "", docUrl: docs[0] || "", sheet_name: "" }])
-                    setSelectedSheet(preferredSheet)
                     setEditingTemplate(name)
+                    setCreateStep(3) // Start in review mode
                     setIsDialogOpen(true)
-                    void loadSheetNamesFromExcelUrl(typeof data.excel_url === "string" ? data.excel_url : "", preferredSheet)
+
+                    // Load the Excel file with previously selected cells
+                    if (data.excel_url) {
+                      void loadExcelForEditing(data.excel_url, normalized)
+                    }
                   } catch (err) {
                     console.error("Failed to load template for editing", err)
                     toast({ variant: "destructive", title: "Load Failed", description: "Could not open template for editing." })
@@ -1096,16 +1198,113 @@ const MetricTemplateSelector: FC<{
         </DialogHeader>
 
         {editingTemplate ? (
-          // --- Existing edit flow ---
-          <>
-            <div className="space-y-4">
-              <Input
-                placeholder="Template Name"
-                id="templateNameInput"
-                defaultValue={editingTemplate || ""}
-              />
+          // --- Editing flow with multi-step support ---
+          <div className="flex gap-6">
+            {/* Vertical stepper */}
+            <div className="w-48">
+              <div className="relative">
+                <div className="absolute left-3 top-0 bottom-0 w-0.5 bg-gray-200" />
+                {[
+                  { id: 2, label: "Select Cells" },
+                  { id: 3, label: "Review & Save" },
+                ].map((s) => (
+                  <div key={s.id} className="relative pl-8 py-3">
+                    <div className={`absolute left-0 top-1.5 h-6 w-6 rounded-full border-2 flex items-center justify-center ${createStep >= (s.id as 1 | 2 | 3) ? "border-primary" : "border-gray-300"}`}>
+                      <div className={`h-3 w-3 rounded-full ${createStep > (s.id as 1 | 2 | 3) ? "bg-primary" : createStep === (s.id as 1 | 2 | 3) ? "bg-primary/60" : "bg-gray-200"}`} />
+                    </div>
+                    <div className={`text-sm ${createStep >= (s.id as 1 | 2 | 3) ? "text-gray-900" : "text-gray-500"}`}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-                      <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
+            {/* Step content */}
+            <div className="flex-1 space-y-4">
+              {createStep === 2 && (
+                <div className="flex flex-col gap-3 h-[60vh]">
+                  {/* Grid viewer */}
+                  <div className="flex-1 border rounded overflow-x-auto overflow-y-auto bg-white touch-pan-x scroll-x">
+                    <table
+                      className="table-auto text-xs"
+                      style={{ WebkitOverflowScrolling: "touch", minWidth: tableMinWidthPx ? `${tableMinWidthPx}px` : undefined }}
+                    >
+                      <tbody>
+                        {sheetGrid.map((row, rIdx) => (
+                          <tr key={rIdx}>
+                            {row.map((val, cIdx) => {
+                               const addr = encodeCellAddress(rIdx, cIdx)
+                              const currentSet = selectedSheet ? selectedCellsBySheet[selectedSheet] : undefined
+                              const isSel = Boolean(currentSet && currentSet.has(addr))
+                              const previousSet = selectedSheet ? previouslySelectedCells[selectedSheet] : undefined
+                              const wasPreviouslySel = Boolean(previousSet && previousSet.has(addr))
+                              return (
+                                <td
+                                  key={cIdx}
+                                  onClick={() => toggleCell(rIdx, cIdx)}
+                                  className={`border px-2 py-1 cursor-pointer align-top text-[11px] whitespace-nowrap ${
+                                    isSel
+                                      ? wasPreviouslySel
+                                        ? "bg-blue-100 border-blue-500"
+                                        : "bg-primary/10 border-primary"
+                                      : "bg-white"
+                                  }`}
+                                  title={addr}
+                                >
+                                  {val != null ? String(val) : ""}
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Bottom sheet tabs like Excel */}
+                  <div className="flex items-center gap-1 overflow-x-auto border rounded bg-white p-1">
+                    {((workbook?.SheetNames ?? []) as string[]).map((name) => {
+                      const isActive = name === selectedSheet
+                      return (
+                        <button
+                          key={name}
+                          onClick={() => changeSheet(name)}
+                          className={`px-3 py-1 text-xs rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                            isActive ? "bg-primary/10 border-primary text-primary" : "bg-white hover:bg-gray-50"
+                          }`}
+                        >
+                          {name}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* Action bar */}
+                  <div className="shrink-0 flex items-center border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" onClick={() => setCreateStep(3)}>Back to Metrics</Button>
+                      <Button
+                        onClick={detectMetrics}
+                        disabled={
+                          isDetecting ||
+                          Object.values(selectedCellsBySheet).reduce((acc, set) => acc + set.size, 0) === 0
+                        }
+                      >
+                        {isDetecting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        {isDetecting ? "Detecting…" : "Add Selected Metrics"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {createStep === 3 && (
+                <>
+                  <Input
+                    placeholder="Template Name"
+                    id="templateNameInput"
+                    defaultValue={editingTemplate || ""}
+                  />
+                  <div className="max-h-[60vh] overflow-y-auto -mx-6 px-6">
                 <Table>
                   <TableHeader className="sticky top-0 bg-white z-10">
                     <TableRow>
@@ -1198,19 +1397,22 @@ const MetricTemplateSelector: FC<{
               <Button variant="outline" onClick={addRow}>
                 <Plus className="h-4 w-4 mr-2" /> Add Row
               </Button>
+              <div className="flex justify-between items-center mt-4">
+                <Button variant="outline" onClick={() => setCreateStep(2)}>Add More from Excel</Button>
+                <Button
+                  onClick={() => {
+                    const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
+                    saveTemplate(nameInput?.value ?? "")
+                    setEditingTemplate(null)
+                  }}
+                >
+                  Save Template
+                </Button>
+              </div>
+                </>
+              )}
             </div>
-            <DialogFooter className="sticky bottom-0 bg-white border-t py-4">
-              <Button
-                onClick={() => {
-                  const nameInput = document.getElementById("templateNameInput") as HTMLInputElement | null
-                  saveTemplate(nameInput?.value ?? "")
-                  setEditingTemplate(null)
-                }}
-              >
-                Save Template
-              </Button>
-            </DialogFooter>
-          </>
+          </div>
         ) : (
           // --- New multi-step creation flow ---
           <div className="flex gap-6">

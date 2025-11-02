@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     if (!name) {
       return NextResponse.json({ error: "Missing template name" }, { status: 400 })
     }
-    let metrics: { metric: string; custom_instruction: string; docUrl?: string; pdf_blob_url?: string; sheet_name?: string }[]
+    let metrics: { metric: string; custom_instruction: string; docUrl?: string; pdf_blob_url?: string; sheet_name?: string; target_row?: number }[]
     try {
       metrics = JSON.parse(metricsRaw || "[]")
     } catch (e) {
@@ -104,6 +104,7 @@ export async function POST(req: Request) {
       custom_instruction: m.custom_instruction,
       pdf_blob_url: m.pdf_blob_url || m.docUrl || "",
       sheet_name: m.sheet_name || "",
+      target_row: m.target_row,
     }))
 
     const contentObject = {
